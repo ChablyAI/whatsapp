@@ -28,15 +28,13 @@ steps:
     # pull: always fetch the latest plugin image tag instead of a stale cached one on the agent.
     pull: true
     settings:
-      # Without this, the plugin logs in to Docker Hub (index.docker.io) and GHCR credentials fail.
-      registry: ghcr.io
-      repo: chablyai/whatsapp
       dockerfile: Dockerfile
+      repo: ghcr.io/chablyai/whatsapp
+      registry: ghcr.io
+      tags:
+        - latest
       platforms: linux/amd64
-      tags: latest
-      logins:
-        - registry: https://ghcr.io
-          username:
-            from_secret: ghcr_username
-          password:
-            from_secret: ghcr_token
+      username:
+        from_secret: ghcr_username
+      password:
+        from_secret: ghcr_token
