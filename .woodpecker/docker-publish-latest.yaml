@@ -1,10 +1,11 @@
 # Pushes linux/amd64 + linux/arm64 image to GitHub Container Registry (GHCR) as :latest.
 #
 # Secrets (repository): ghcr_username, ghcr_password (PAT with write:packages, or compatible token)
-# Requires trusted repo / privileged steps for plugin-docker-buildx.
+# Multi-arch buildx: mark this repo as Trusted in Woodpecker (repo Settings), then add `privileged: true` below again.
+# Without Trusted + privileged, the Woodpecker linter accepts the file but the build step may fail on the agent.
 # Image: ghcr.io/chablyai/whatsapp:latest
-
-name: docker-publish-latest
+#
+# Workflow name comes from the filename (e.g. docker-publish-latest), not a root `name` key.
 
 # Only runs on direct pushes to branch `main` (not tags, not pull_request, not other branches).
 when:
@@ -21,8 +22,8 @@ clone:
 steps:
   - name: build-and-push
     image: woodpeckerci/plugin-docker-buildx
-    # privileged: buildx needs elevated caps (nested docker/buildkit, binfmt/qemu for multi-arch).
-    privileged: true
+    # After enabling Trusted for this repo, uncomment the next line (required for multi-arch buildx on most agents).
+    # privileged: true
     # pull: always fetch the latest plugin image tag instead of a stale cached one on the agent.
     pull: true
     settings:
