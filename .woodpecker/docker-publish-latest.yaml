@@ -1,8 +1,9 @@
-# Pushes linux/amd64 + linux/arm64 image to GitHub Container Registry (GHCR) as :latest.
+# Pushes linux/amd64 image to GitHub Container Registry (GHCR) as :latest.
 #
-# Secrets (repository): ghcr_username, ghcr_token (GitHub PAT: read:packages + write:packages; or GITHUB_TOKEN with packages scope)
-# Multi-arch buildx: mark this repo as Trusted in Woodpecker (repo Settings), then add `privileged: true` below again.
-# Without Trusted + privileged, the Woodpecker linter accepts the file but the build step may fail on the agent.
+# Secrets: ghcr_token = PAT with read:packages + write:packages (classic) or fine-grained Packages R/W.
+# ghcr_username must be the GitHub USERNAME of the account that owns the PAT — not the org name (e.g. not "chablyai").
+# Org with SAML: authorize the PAT for SSO. Org must allow you to publish packages under chablyai/whatsapp.
+# Buildx: if the step fails on the agent, mark the repo as Trusted in Woodpecker and uncomment `privileged: true` below.
 # Image: ghcr.io/chablyai/whatsapp:latest
 #
 # Workflow name comes from the filename (e.g. docker-publish-latest), not a root `name` key.
@@ -22,7 +23,7 @@ clone:
 steps:
   - name: build-and-push
     image: woodpeckerci/plugin-docker-buildx
-    # After enabling Trusted for this repo, uncomment the next line (required for multi-arch buildx on most agents).
+    # Uncomment if the agent requires it (Trusted repo + privileged is often needed for plugin-docker-buildx).
     # privileged: true
     # pull: always fetch the latest plugin image tag instead of a stale cached one on the agent.
     pull: true
@@ -31,7 +32,7 @@ steps:
       registry: ghcr.io
       repo: chablyai/whatsapp
       dockerfile: Dockerfile
-      platforms: linux/amd64,linux/arm64
+      platforms: linux/amd64
       tags: latest
       logins:
         - registry: https://ghcr.io
