@@ -1,0 +1,36 @@
+# Pushes linux/amd64 + linux/arm64 image to GitHub Container Registry (GHCR) as :latest.
+#
+# Secrets (repository): ghcr_username, ghcr_password (PAT with write:packages, or compatible token)
+# Requires trusted repo / privileged steps for plugin-docker-buildx.
+# Image: ghcr.io/chablyai/whatsapp:latest
+
+name: docker-publish-latest
+
+# Only runs on direct pushes to branch `main` (not tags, not pull_request, not other branches).
+when:
+  event: push
+  branch: main
+
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      # Clone Git submodules (.gitmodules); omit or set false if the repo has no submodules.
+      recursive: true
+
+steps:
+  - name: build-and-push
+    image: woodpeckerci/plugin-docker-buildx
+    # privileged: buildx needs elevated caps (nested docker/buildkit, binfmt/qemu for multi-arch).
+    privileged: true
+    # pull: always fetch the latest plugin image tag instead of a stale cached one on the agent.
+    pull: true
+    settings:
+      repo: ghcr.io/chablyai/whatsapp
+      dockerfile: Dockerfile
+      platforms: linux/amd64,linux/arm64
+      tags: latest
+      username:
+        from_secret: ghcr_username
+      password:
+        from_secret: ghcr_password
