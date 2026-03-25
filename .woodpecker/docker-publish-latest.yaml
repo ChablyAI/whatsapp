@@ -1,6 +1,6 @@
 # Pushes linux/amd64 + linux/arm64 image to GitHub Container Registry (GHCR) as :latest.
 #
-# Secrets (repository): ghcr_username, ghcr_password (PAT with write:packages, or compatible token)
+# Secrets (repository): ghcr_username, ghcr_token (GitHub PAT: read:packages + write:packages; or GITHUB_TOKEN with packages scope)
 # Multi-arch buildx: mark this repo as Trusted in Woodpecker (repo Settings), then add `privileged: true` below again.
 # Without Trusted + privileged, the Woodpecker linter accepts the file but the build step may fail on the agent.
 # Image: ghcr.io/chablyai/whatsapp:latest
@@ -27,11 +27,15 @@ steps:
     # pull: always fetch the latest plugin image tag instead of a stale cached one on the agent.
     pull: true
     settings:
-      repo: ghcr.io/chablyai/whatsapp
+      # Without this, the plugin logs in to Docker Hub (index.docker.io) and GHCR credentials fail.
+      registry: ghcr.io
+      repo: chablyai/whatsapp
       dockerfile: Dockerfile
       platforms: linux/amd64,linux/arm64
       tags: latest
-      username:
-        from_secret: ghcr_username
-      password:
-        from_secret: ghcr_token
+      logins:
+        - registry: https://ghcr.io
+          username:
+            from_secret: ghcr_username
+          password:
+            from_secret: ghcr_token
