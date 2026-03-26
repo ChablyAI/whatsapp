@@ -1,6 +1,6 @@
 # Optional: API + Manager as Docker images (uses services from docker-compose.services.yaml).
 # Start deps first, then:
-#   docker compose --env-file .env.local -f docker-compose.services.yaml -f docker-compose.dev.yaml up --build
+#   docker compose -f docker-compose.services.yaml -f docker-compose.dev.yaml up --build
 #
 # For day-to-day dev with hot reload, prefer: docker-compose.services.yaml + npm run dev:server + npm run dev:manager
 
@@ -27,8 +27,6 @@ services:
       - evolution-net
     env_file:
       - path: .env
-        required: false
-      - path: .env.local
         required: false
     expose:
       - 8080

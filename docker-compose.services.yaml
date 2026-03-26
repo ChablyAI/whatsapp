@@ -1,9 +1,9 @@
 # Local dev dependencies only: Postgres, Redis, RabbitMQ, MinIO.
-# Run: docker compose --env-file .env.local -f docker-compose.services.yaml up -d
-# Then API: npm run dev:server | Manager: npm run dev:manager (with .env.local host ports for DB/Redis)
+# Run: docker compose -f docker-compose.services.yaml up -d
+# Then API: npm run dev:server | Manager: npm run dev:manager (with host ports for DB/Redis)
 #
-# env_file: .env then .env.local (later wins). For ${VAR} in this file use:
-#   docker compose --env-file .env.local -f docker-compose.services.yaml up -d
+# env_file: .env. For ${VAR} in this file use:
+#   docker compose -f docker-compose.services.yaml up -d
 #
 # Host ports (avoid local conflicts): Postgres 15432, Redis 16379, MinIO API 19000 / console 19001
 
@@ -31,8 +31,6 @@ services:
     restart: always
     env_file:
       - path: .env
-        required: false
-      - path: .env.local
         required: false
     environment:
       POSTGRES_DB: ${POSTGRES_DATABASE:-evolution_api}
