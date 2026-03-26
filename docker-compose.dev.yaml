@@ -3,7 +3,8 @@
 # For ${VAR} substitution in this YAML, Compose reads project .env by default; if vars live only
 # in .env.local, run: docker compose --env-file .env.local -f docker-compose.dev.yaml up
 # From the API container use service names as hostnames, e.g.:
-#   DATABASE_CONNECTION_URI=postgresql://USER:PASS@evolution-postgres:5432/DB?schema=evolution_api
+#   DATABASE_CONNECTION_URI=postgresql://USER:PASS@evolution-postgres:5432/DB?schema=evolution_api (API in Docker)
+#   From host (DBeaver etc.): port 15432 -> same DB inside container
 #   CACHE_REDIS_URI=redis://redis:6379/6 (containers). From host CLI: redis-cli -p 16379
 #   RABBITMQ_URI=amqp://guest:guest@rabbitmq:5672
 # MinIO: API uses minio:9000 inside Docker. Host mapping uses 19000/19001 to avoid clashing with
@@ -90,7 +91,7 @@ services:
     networks:
       - evolution-net
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:15432:5432"
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
       interval: 5s
