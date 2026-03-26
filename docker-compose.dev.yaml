@@ -4,7 +4,7 @@
 # in .env.local, run: docker compose --env-file .env.local -f docker-compose.dev.yaml up
 # From the API container use service names as hostnames, e.g.:
 #   DATABASE_CONNECTION_URI=postgresql://USER:PASS@evolution-postgres:5432/DB?schema=evolution_api
-#   CACHE_REDIS_URI=redis://redis:6379/6
+#   CACHE_REDIS_URI=redis://redis:6379/6 (containers). From host CLI: redis-cli -p 16379
 #   RABBITMQ_URI=amqp://guest:guest@rabbitmq:5672
 # MinIO: API uses minio:9000 inside Docker. Host mapping uses 19000/19001 to avoid clashing with
 # PHP-FPM/MAMP on :9000. Console: http://127.0.0.1:19001 — S3 from host tools: 127.0.0.1:19000
@@ -59,7 +59,7 @@ services:
     networks:
       - evolution-net
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:16379:6379"
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
