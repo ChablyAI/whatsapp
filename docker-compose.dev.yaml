@@ -1,15 +1,8 @@
-# Dev stack: API + manager + Postgres, Redis, RabbitMQ, MinIO (S3-compatible).
-# env_file: .env then .env.local (later wins). Both optional so you can use only .env.local.
-# For ${VAR} substitution in this YAML, Compose reads project .env by default; if vars live only
-# in .env.local, run: docker compose --env-file .env.local -f docker-compose.dev.yaml up
-# From the API container use service names as hostnames, e.g.:
-#   DATABASE_CONNECTION_URI=postgresql://USER:PASS@evolution-postgres:5432/DB?schema=evolution_api (API in Docker)
-#   From host (DBeaver etc.): port 15432 -> same DB inside container
-#   CACHE_REDIS_URI=redis://redis:6379/6 (containers). From host CLI: redis-cli -p 16379
-#   RABBITMQ_URI=amqp://guest:guest@rabbitmq:5672
-# MinIO: API uses minio:9000 inside Docker. Host mapping uses 19000/19001 to avoid clashing with
-# PHP-FPM/MAMP on :9000. Console: http://127.0.0.1:19001 — S3 from host tools: 127.0.0.1:19000
-# S3 in API: S3_ENDPOINT=minio, S3_PORT=9000 (unchanged)
+# Optional: API + Manager as Docker images (uses services from docker-compose.services.yaml).
+# Start deps first, then:
+#   docker compose --env-file .env.local -f docker-compose.services.yaml -f docker-compose.dev.yaml up --build
+#
+# For day-to-day dev with hot reload, prefer: docker-compose.services.yaml + npm run dev:server + npm run dev:manager
 
 services:
   api:
@@ -50,96 +43,8 @@ services:
     networks:
       - evolution-net
 
-  redis:
-    container_name: evolution_redis
-    image: redis:7-alpine
-    restart: always
-    command: redis-server --port 6379 --appendonly yes
-    volumes:
-      - evolution_redis:/data
-    networks:
-      - evolution-net
-    ports:
-      - "127.0.0.1:16379:6379"
-    healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  evolution-postgres:
-    container_name: evolution_postgres
-    image: postgres:15
-    restart: always
-    env_file:
-      - path: .env
-        required: false
-      - path: .env.local
-        required: false
-    environment:
-      POSTGRES_DB: ${POSTGRES_DATABASE:-evolution_api}
-      POSTGRES_USER: ${POSTGRES_USERNAME:-evolution}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-evolution}
-    command:
-      - postgres
-      - -c
-      - max_connections=1000
-      - -c
-      - listen_addresses=*
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - evolution-net
-    ports:
-      - "127.0.0.1:15432:5432"
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  rabbitmq:
-    container_name: evolution_rabbitmq
-    image: rabbitmq:3-management-alpine
-    restart: always
-    environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    networks:
-      - evolution-net
-    ports:
-      - "127.0.0.1:5672:5672"
-      - "127.0.0.1:15672:15672"
-    healthcheck:
-      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  minio:
-    container_name: evolution_minio
-    image: minio/minio:latest
-    restart: always
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio123456}
-    volumes:
-      - minio_data:/data
-    networks:
-      - evolution-net
-    ports:
-      - "127.0.0.1:19000:9000"
-      - "127.0.0.1:19001:9001"
-
 volumes:
   evolution_instances:
-  evolution_redis:
-  postgres_data:
-  rabbitmq_data:
-  minio_data:
 
 networks:
   evolution-net:
