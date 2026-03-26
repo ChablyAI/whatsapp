@@ -9,7 +9,7 @@
     "start": "npx tsx ./src/main.ts",
     "start:prod": "node dist/main",
     "dev:server": "npx tsx watch ./src/main.ts",
-    "dev:manager": "npm run dev --prefix evolution-manager-v2",
+    "dev:manager": "npm install --prefix evolution-manager-v2 && npm run dev --prefix evolution-manager-v2",
     "test": "npx tsx watch ./test/all.test.ts",
     "lint": "eslint --fix --ext .ts src",
     "lint:check": "eslint --ext .ts src",
