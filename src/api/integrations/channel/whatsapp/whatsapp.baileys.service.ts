@@ -113,6 +113,7 @@ import makeWASocket, {
   isJidBroadcast,
   isJidGroup,
   isJidNewsletter,
+  isLidUser,
   isPnUser,
   jidNormalizedUser,
   makeCacheableSignalKeyStore,
@@ -160,6 +161,10 @@ export interface ExtendedIMessageKey extends proto.IMessageKey {
   participantAlt?: string;
   server_id?: string;
   isViewOnce?: boolean;
+  /** Baileys: stanza addressing_mode (pn | lid) */
+  addressingMode?: string;
+  /** Peer LID for 1:1 (same role as chat sync accountLid); in groups = sender LID when known */
+  accountLid?: string;
 }
 
 const groupMetadataCache = new CacheService(new CacheEngine(configService, 'groups').getEngine());
@@ -1043,7 +1048,9 @@ export class BaileysStartupService extends ChannelStartupService {
             }
           }
 
-          messagesRaw.push(this.prepareMessage(m));
+          const prepared = this.prepareMessage(m);
+          await this.enrichMessageKeyWithLid(prepared.key);
+          messagesRaw.push(prepared);
         }
 
         this.sendDataWebhook(Events.MESSAGES_SET, [...messagesRaw], true, undefined, {
@@ -1202,6 +1209,7 @@ export class BaileysStartupService extends ChannelStartupService {
           }
 
           const messageRaw = this.prepareMessage(received);
+          await this.enrichMessageKeyWithLid(messageRaw.key);
 
           if (messageRaw.messageType === 'pollUpdateMessage') {
             const pollCreationKey = messageRaw.message.pollUpdateMessage.pollCreationMessageKey;
@@ -1610,11 +1618,18 @@ export class BaileysStartupService extends ChannelStartupService {
             }
           }
 
+          const keyEnriched = { ...key } as ExtendedIMessageKey;
+          await this.enrichMessageKeyWithLid(keyEnriched);
+
           const message: any = {
             keyId: key.id,
             remoteJid: key?.remoteJid,
             fromMe: key.fromMe,
             participant: key?.participant,
+            remoteJidAlt: keyEnriched.remoteJidAlt,
+            participantAlt: keyEnriched.participantAlt,
+            addressingMode: keyEnriched.addressingMode,
+            accountLid: keyEnriched.accountLid,
             status: status[update.status] ?? 'SERVER_ACK',
             pollUpdates,
             instanceId: this.instanceId,
@@ -1653,7 +1668,9 @@ export class BaileysStartupService extends ChannelStartupService {
           }
 
           if (update.message === null && update.status === undefined) {
-            this.sendDataWebhook(Events.MESSAGES_DELETE, { ...key, status: 'DELETED' });
+            const deleteKey = { ...key } as ExtendedIMessageKey;
+            await this.enrichMessageKeyWithLid(deleteKey);
+            this.sendDataWebhook(Events.MESSAGES_DELETE, { ...deleteKey, status: 'DELETED' });
 
             if (this.configService.get<Database>('DATABASE').SAVE_DATA.MESSAGE_UPDATE)
               await this.prismaRepository.messageUpdate.create({ data: message });
@@ -1702,9 +1719,18 @@ export class BaileysStartupService extends ChannelStartupService {
           this.sendDataWebhook(Events.MESSAGES_UPDATE, message);
 
           if (this.configService.get<Database>('DATABASE').SAVE_DATA.MESSAGE_UPDATE) {
-            // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            const { message: _msg, ...messageData } = message;
-            await this.prismaRepository.messageUpdate.create({ data: messageData });
+            await this.prismaRepository.messageUpdate.create({
+              data: {
+                keyId: message.keyId,
+                remoteJid: message.remoteJid,
+                fromMe: message.fromMe,
+                participant: message.participant,
+                pollUpdates: message.pollUpdates,
+                status: message.status,
+                messageId: message.messageId,
+                instanceId: message.instanceId,
+              },
+            });
           }
 
           const existingChat = await this.prismaRepository.chat.findFirst({
@@ -1881,22 +1907,49 @@ export class BaileysStartupService extends ChannelStartupService {
             const settings = await this.findSettings();
 
             if (events.call) {
-              const call = events.call[0];
+              const rawCall = events.call[0];
+              const lidMapping = this.client.signalRepository.lidMapping;
+              let accountLid: string | undefined;
+              let chatAccountLid: string | undefined;
 
-              if (settings?.rejectCall && call.status == 'offer') {
-                this.client.rejectCall(call.id, call.from);
+              try {
+                const from = rawCall.from;
+                if (from?.endsWith('@lid') || isLidUser(from)) {
+                  accountLid = jidNormalizedUser(from);
+                } else if (from && isPnUser(from)) {
+                  accountLid = (await lidMapping.getLIDForPN(jidNormalizedUser(from))) ?? undefined;
+                }
+
+                const chatId = rawCall.groupJid || rawCall.chatId;
+                if (chatId?.endsWith('@lid') || isLidUser(chatId)) {
+                  chatAccountLid = jidNormalizedUser(chatId);
+                } else if (chatId && isPnUser(chatId)) {
+                  chatAccountLid = (await lidMapping.getLIDForPN(jidNormalizedUser(chatId))) ?? undefined;
+                }
+              } catch {
+                // best-effort
               }
 
-              if (settings?.msgCall?.trim().length > 0 && call.status == 'offer') {
-                if (call.from.endsWith('@lid')) {
-                  call.from = await this.client.signalRepository.lidMapping.getPNForLID(call.from as string);
+              const callPayload = { ...rawCall, accountLid, chatAccountLid };
+
+              if (settings?.rejectCall && rawCall.status == 'offer') {
+                this.client.rejectCall(rawCall.id, rawCall.from);
+              }
+
+              if (settings?.msgCall?.trim().length > 0 && rawCall.status == 'offer') {
+                let toJid = rawCall.from;
+                if (toJid?.endsWith('@lid') && lidMapping) {
+                  const pn = await lidMapping.getPNForLID(toJid as string);
+                  if (pn) {
+                    toJid = pn;
+                  }
                 }
-                const msg = await this.client.sendMessage(call.from, { text: settings.msgCall });
+                const msg = await this.client.sendMessage(toJid, { text: settings.msgCall });
 
                 this.client.ev.emit('messages.upsert', { messages: [msg], type: 'notify' });
               }
 
-              this.sendDataWebhook(Events.CALL, call);
+              this.sendDataWebhook(Events.CALL, callPayload);
             }
 
             if (events['connection.update']) {
@@ -2423,6 +2476,7 @@ export class BaileysStartupService extends ChannelStartupService {
       }
 
       const messageRaw = this.prepareMessage(messageSent);
+      await this.enrichMessageKeyWithLid(messageRaw.key);
 
       const isMedia =
         messageSent?.message?.imageMessage ||
@@ -4649,12 +4703,101 @@ export class BaileysStartupService extends ChannelStartupService {
     return obj;
   }
 
+  /**
+   * Fills remoteJidAlt / participantAlt / accountLid from lidMapping when Baileys omitted them on the stanza.
+   */
+  private async enrichMessageKeyWithLid(key: WAMessageKey): Promise<void> {
+    if (!key?.remoteJid || !this.client?.signalRepository?.lidMapping) {
+      return;
+    }
+
+    const lidMapping = this.client.signalRepository.lidMapping;
+    const k = key as ExtendedIMessageKey;
+    const remote = key.remoteJid;
+
+    const enrichParticipant = async (p: string) => {
+      const pNorm = jidNormalizedUser(p);
+      if (!pNorm) {
+        return;
+      }
+      if (p.endsWith('@lid') || isLidUser(p)) {
+        if (!k.participantAlt) {
+          const pn = await lidMapping.getPNForLID(pNorm);
+          if (pn) {
+            k.participantAlt = pn;
+          }
+        }
+        if (!k.accountLid) {
+          k.accountLid = pNorm;
+        }
+      } else if (isPnUser(p)) {
+        if (!k.participantAlt) {
+          const lid = await lidMapping.getLIDForPN(pNorm);
+          if (lid) {
+            k.participantAlt = lid;
+          }
+        }
+        if (!k.accountLid) {
+          k.accountLid = k.participantAlt ?? (await lidMapping.getLIDForPN(pNorm)) ?? undefined;
+        }
+      }
+    };
+
+    try {
+      if (isJidGroup(remote) || isJidBroadcast(remote)) {
+        if (key.participant) {
+          await enrichParticipant(key.participant);
+        }
+        return;
+      }
+
+      if (remote === 'status@broadcast' && key.participant) {
+        await enrichParticipant(key.participant);
+        return;
+      }
+
+      if (isJidNewsletter(remote)) {
+        return;
+      }
+
+      const rNorm = jidNormalizedUser(remote);
+      if (remote.endsWith('@lid') || isLidUser(remote)) {
+        if (!k.remoteJidAlt) {
+          const pn = await lidMapping.getPNForLID(rNorm);
+          if (pn) {
+            k.remoteJidAlt = pn;
+          }
+        }
+        if (!k.accountLid) {
+          k.accountLid = rNorm;
+        }
+      } else if (isPnUser(remote)) {
+        if (!k.remoteJidAlt) {
+          const lid = await lidMapping.getLIDForPN(rNorm);
+          if (lid) {
+            k.remoteJidAlt = lid;
+          }
+        }
+        if (!k.accountLid) {
+          const alt = k.remoteJidAlt;
+          if (alt && (alt.endsWith('@lid') || isLidUser(alt))) {
+            k.accountLid = jidNormalizedUser(alt);
+          } else {
+            k.accountLid = (await lidMapping.getLIDForPN(rNorm)) ?? undefined;
+          }
+        }
+      }
+    } catch {
+      // Enrichment is best-effort only
+    }
+  }
+
   private prepareMessage(message: proto.IWebMessageInfo): any {
     const contentType = getContentType(message.message);
     const contentMsg = message?.message[contentType] as any;
 
     const messageRaw = {
-      key: message.key, // Save key exactly as it comes from Baileys
+      key: { ...message.key } as ExtendedIMessageKey, // Clone so LID enrichments do not mutate Baileys internals
       pushName:
         message.pushName ||
         (message.key.fromMe
