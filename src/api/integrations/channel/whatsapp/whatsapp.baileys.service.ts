@@ -4703,92 +4703,107 @@ export class BaileysStartupService extends ChannelStartupService {
     return obj;
   }
 
+  /** Strip multi-device suffix from PN alts (905...:0@s.whatsapp.net → 905...@s.whatsapp.net). */
+  private normalizeKeyPnAltFields(k: ExtendedIMessageKey): void {
+    if (k.participantAlt && isPnUser(k.participantAlt)) {
+      const noDevice = jidNormalizedUser(k.participantAlt);
+      if (noDevice) {
+        k.participantAlt = noDevice;
+      }
+    }
+    if (k.remoteJidAlt && isPnUser(k.remoteJidAlt)) {
+      const noDevice = jidNormalizedUser(k.remoteJidAlt);
+      if (noDevice) {
+        k.remoteJidAlt = noDevice;
+      }
+    }
+  }
+
   /**
    * Fills remoteJidAlt / participantAlt / accountLid from lidMapping when Baileys omitted them on the stanza.
    */
   private async enrichMessageKeyWithLid(key: WAMessageKey): Promise<void> {
-    if (!key?.remoteJid || !this.client?.signalRepository?.lidMapping) {
+    if (!key?.remoteJid) {
       return;
     }
 
-    const lidMapping = this.client.signalRepository.lidMapping;
     const k = key as ExtendedIMessageKey;
-    const remote = key.remoteJid;
-
-    const enrichParticipant = async (p: string) => {
-      const pNorm = jidNormalizedUser(p);
-      if (!pNorm) {
-        return;
-      }
-      if (p.endsWith('@lid') || isLidUser(p)) {
-        if (!k.participantAlt) {
-          const pn = await lidMapping.getPNForLID(pNorm);
-          if (pn) {
-            k.participantAlt = pn;
-          }
-        }
-        if (!k.accountLid) {
-          k.accountLid = pNorm;
-        }
-      } else if (isPnUser(p)) {
-        if (!k.participantAlt) {
-          const lid = await lidMapping.getLIDForPN(pNorm);
-          if (lid) {
-            k.participantAlt = lid;
-          }
-        }
-        if (!k.accountLid) {
-          k.accountLid = k.participantAlt ?? (await lidMapping.getLIDForPN(pNorm)) ?? undefined;
-        }
-      }
-    };
 
     try {
+      const lidMapping = this.client?.signalRepository?.lidMapping;
+      if (!lidMapping) {
+        return;
+      }
+
+      const remote = key.remoteJid;
+
+      const enrichParticipant = async (p: string) => {
+        const pNorm = jidNormalizedUser(p);
+        if (!pNorm) {
+          return;
+        }
+        if (p.endsWith('@lid') || isLidUser(p)) {
+          if (!k.participantAlt) {
+            const pn = await lidMapping.getPNForLID(pNorm);
+            if (pn) {
+              k.participantAlt = pn;
+            }
+          }
+          if (!k.accountLid) {
+            k.accountLid = pNorm;
+          }
+        } else if (isPnUser(p)) {
+          if (!k.participantAlt) {
+            const lid = await lidMapping.getLIDForPN(pNorm);
+            if (lid) {
+              k.participantAlt = lid;
+            }
+          }
+          if (!k.accountLid) {
+            k.accountLid = k.participantAlt ?? (await lidMapping.getLIDForPN(pNorm)) ?? undefined;
+          }
+        }
+      };
+
       if (isJidGroup(remote) || isJidBroadcast(remote)) {
         if (key.participant) {
           await enrichParticipant(key.participant);
         }
-        return;
-      }
-
-      if (remote === 'status@broadcast' && key.participant) {
+      } else if (remote === 'status@broadcast' && key.participant) {
         await enrichParticipant(key.participant);
-        return;
-      }
-
-      if (isJidNewsletter(remote)) {
-        return;
-      }
-
-      const rNorm = jidNormalizedUser(remote);
-      if (remote.endsWith('@lid') || isLidUser(remote)) {
-        if (!k.remoteJidAlt) {
-          const pn = await lidMapping.getPNForLID(rNorm);
-          if (pn) {
-            k.remoteJidAlt = pn;
+      } else if (!isJidNewsletter(remote)) {
+        const rNorm = jidNormalizedUser(remote);
+        if (remote.endsWith('@lid') || isLidUser(remote)) {
+          if (!k.remoteJidAlt) {
+            const pn = await lidMapping.getPNForLID(rNorm);
+            if (pn) {
+              k.remoteJidAlt = pn;
+            }
           }
-        }
-        if (!k.accountLid) {
-          k.accountLid = rNorm;
-        }
-      } else if (isPnUser(remote)) {
-        if (!k.remoteJidAlt) {
-          const lid = await lidMapping.getLIDForPN(rNorm);
-          if (lid) {
-            k.remoteJidAlt = lid;
+          if (!k.accountLid) {
+            k.accountLid = rNorm;
           }
-        }
-        if (!k.accountLid) {
-          const alt = k.remoteJidAlt;
-          if (alt && (alt.endsWith('@lid') || isLidUser(alt))) {
-            k.accountLid = jidNormalizedUser(alt);
-          } else {
-            k.accountLid = (await lidMapping.getLIDForPN(rNorm)) ?? undefined;
+        } else if (isPnUser(remote)) {
+          if (!k.remoteJidAlt) {
+            const lid = await lidMapping.getLIDForPN(rNorm);
+            if (lid) {
+              k.remoteJidAlt = lid;
+            }
+          }
+          if (!k.accountLid) {
+            const alt = k.remoteJidAlt;
+            if (alt && (alt.endsWith('@lid') || isLidUser(alt))) {
+              k.accountLid = jidNormalizedUser(alt);
+            } else {
+              k.accountLid = (await lidMapping.getLIDForPN(rNorm)) ?? undefined;
+            }
           }
         }
       }
     } catch {
       // Enrichment is best-effort only
+    } finally {
+      this.normalizeKeyPnAltFields(k);
     }
   }
 
