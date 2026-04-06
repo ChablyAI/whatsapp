@@ -150,7 +150,11 @@ export class InstanceController {
       if (!instanceData.chatwootAccountId || !instanceData.chatwootToken || !instanceData.chatwootUrl) {
         let getQrcode: wa.QrCode;
 
-        if (instanceData.qrcode && instanceData.integration === Integration.WHATSAPP_BAILEYS) {
+        if (
+          instanceData.qrcode &&
+          (instanceData.integration === Integration.WHATSAPP_BAILEYS ||
+            instanceData.integration === Integration.WHATSAPP_WWEBJS)
+        ) {
           await instance.connectToWhatsapp(instanceData.number);
           await delay(5000);
           getQrcode = instance.qrCode;
