@@ -43,17 +43,21 @@ import {
   SendStickerDto,
   SendTextDto,
 } from '@api/dto/sendMessage.dto';
+import * as s3Service from '@api/integrations/storage/s3/libs/minio.server';
 import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository, Query } from '@api/repository/repository.service';
+import { chatbotController } from '@api/server.module';
 import { CacheService } from '@api/services/cache.service';
 import { ChannelStartupService } from '@api/services/channel.service';
-import { Events, wa } from '@api/types/wa.types';
-import { Chatwoot, ConfigService, QrCode } from '@config/env.config';
+import { Events, TypeMediaMessage, wa } from '@api/types/wa.types';
+import { Chatwoot, ConfigService, Database, QrCode, S3 } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
 import { Message } from '@prisma/client';
+import { sendTelemetry } from '@utils/sendTelemetry';
 import EventEmitter2 from 'eventemitter2';
 import qrcode, { QRCodeToDataURLOptions } from 'qrcode';
+import { v4 } from 'uuid';
 
 import { PrismaRemoteStore } from './wwebjs.prisma-store';
 
@@ -117,6 +121,17 @@ export class WWebJSStartupService extends ChannelStartupService {
       this.loadWebhook();
       this.loadProxy();
 
+      this.stateConnection = {
+        instance: this.instance.name,
+        state: 'connecting',
+        statusReason: 200,
+      };
+
+      await this.prismaRepository.instance.update({
+        where: { id: this.instanceId },
+        data: { connectionStatus: 'connecting' },
+      });
+
       return await this.createClient(number);
     } catch (error) {
       this.logger.error(error);
@@ -169,8 +184,9 @@ export class WWebJSStartupService extends ChannelStartupService {
       this.phoneNumber = number || this.phoneNumber;
     }
 
+    // @todo bu alanda headless true olarak ayarlanacak
     const puppeteerOptions: any = {
-      headless: true,
+      headless: false,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -232,6 +248,17 @@ export class WWebJSStartupService extends ChannelStartupService {
         return;
       }
 
+      this.stateConnection = {
+        instance: this.instance.name,
+        state: 'connecting',
+        statusReason: 200,
+      };
+
+      await this.prismaRepository.instance.update({
+        where: { id: this.instanceId },
+        data: { connectionStatus: 'connecting' },
+      });
+
       this.instance.qrcode.code = qr;
 
       const color = this.configService.get<QrCode>('QRCODE').COLOR;
@@ -274,9 +301,14 @@ export class WWebJSStartupService extends ChannelStartupService {
       this.logger.info(`Client authenticated for instance: ${this.instanceName}`);
     });
 
-    this.wwebClient.on('auth_failure', (message: string) => {
+    this.wwebClient.on('auth_failure', async (message: string) => {
       this.logger.error(`Authentication failure: ${message}`);
       this.stateConnection = { state: 'close' };
+
+      await this.prismaRepository.instance.update({
+        where: { id: this.instanceId },
+        data: { connectionStatus: 'close' },
+      });
 
       this.sendDataWebhook(Events.CONNECTION_UPDATE, {
         instance: this.instance.name,
@@ -364,13 +396,540 @@ export class WWebJSStartupService extends ChannelStartupService {
       }
     });
 
-    this.wwebClient.on('change_state', (state: string) => {
+    this.wwebClient.on('change_state', async (state: string) => {
       this.logger.info(`Connection state changed: ${state}`);
+
+      const stateMap: Record<string, string> = {
+        CONNECTED: 'open',
+        OPENING: 'connecting',
+        PAIRING: 'connecting',
+        TIMEOUT: 'close',
+        CONFLICT: 'close',
+        UNLAUNCHED: 'close',
+        UNPAIRED: 'close',
+        UNPAIRED_IDLE: 'close',
+      };
+
+      const mappedState = (stateMap[state] || 'connecting') as 'open' | 'connecting' | 'close';
+
+      this.stateConnection = {
+        instance: this.instance.name,
+        state: mappedState,
+        statusReason: mappedState === 'open' ? 200 : mappedState === 'close' ? 408 : 200,
+      };
+
+      await this.prismaRepository.instance.update({
+        where: { id: this.instanceId },
+        data: { connectionStatus: mappedState },
+      });
+
+      this.sendDataWebhook(Events.CONNECTION_UPDATE, {
+        instance: this.instance.name,
+        state: mappedState,
+        statusReason: this.stateConnection.statusReason,
+      });
     });
 
     this.wwebClient.on('remote_session_saved', () => {
       this.logger.info(`Remote session saved to database for instance: ${this.instanceName}`);
     });
+
+    // =====================================================
+    // MESSAGE RECEIVING HANDLERS
+    // =====================================================
+
+    this.wwebClient.on('message_create', async (msg: any) => {
+      try {
+        if (this.endSession) return;
+
+        const isGroup = msg.from?.endsWith('@g.us') || msg.to?.endsWith('@g.us');
+        if (this.localSettings.groupsIgnore && isGroup) return;
+
+        this.logger.info(`Message ${msg.fromMe ? 'sent' : 'received'}: type=${msg.type}, id=${msg.id?._serialized}`);
+
+        await this.handleIncomingMessage(msg);
+      } catch (error) {
+        this.logger.error(`Error handling message: ${error}`);
+      }
+    });
+
+    this.wwebClient.on('message_ack', async (msg: any, ack: number) => {
+      try {
+        const ackStatus = this.mapAckToStatus(ack);
+        const keyId = msg.id?._serialized || msg.id?.id;
+
+        if (this.configService.get<Database>('DATABASE').SAVE_DATA.MESSAGE_UPDATE) {
+          const existingMsg = await this.prismaRepository.message.findFirst({
+            where: {
+              instanceId: this.instanceId,
+              key: { path: ['id'], equals: keyId },
+            },
+          });
+
+          if (existingMsg) {
+            await this.prismaRepository.messageUpdate.create({
+              data: {
+                keyId,
+                remoteJid: msg.from || msg.to,
+                fromMe: msg.fromMe ?? false,
+                status: ackStatus,
+                messageId: existingMsg.id,
+                instanceId: this.instanceId,
+              },
+            });
+          }
+        }
+
+        this.sendDataWebhook(Events.MESSAGES_UPDATE, {
+          key: {
+            remoteJid: msg.from || msg.to,
+            fromMe: msg.fromMe,
+            id: keyId,
+          },
+          status: ackStatus,
+          instanceId: this.instanceId,
+        });
+      } catch (error) {
+        this.logger.error(`Error handling message ack: ${error}`);
+      }
+    });
+
+    this.wwebClient.on('message_revoke_everyone', async (revokedMsg: any, oldMsg: any) => {
+      try {
+        const keyId = revokedMsg.id?._serialized || revokedMsg.id?.id;
+
+        if (this.configService.get<Database>('DATABASE').DELETE_DATA?.LOGICAL_MESSAGE_DELETE) {
+          await this.prismaRepository.message.updateMany({
+            where: {
+              instanceId: this.instanceId,
+              key: { path: ['id'], equals: keyId },
+            },
+            data: { status: 'DELETED' },
+          });
+        }
+
+        this.sendDataWebhook(Events.MESSAGES_DELETE, {
+          key: {
+            remoteJid: revokedMsg.from || revokedMsg.to,
+            fromMe: revokedMsg.fromMe,
+            id: keyId,
+          },
+          message: oldMsg ? { conversation: oldMsg.body } : undefined,
+          instanceId: this.instanceId,
+        });
+      } catch (error) {
+        this.logger.error(`Error handling message revoke: ${error}`);
+      }
+    });
+
+    this.wwebClient.on('message_edit', async (msg: any, newBody: string, prevBody: string) => {
+      try {
+        const keyId = msg.id?._serialized || msg.id?.id;
+
+        const existingMsg = await this.prismaRepository.message.findFirst({
+          where: {
+            instanceId: this.instanceId,
+            key: { path: ['id'], equals: keyId },
+          },
+        });
+
+        if (existingMsg) {
+          await this.prismaRepository.message.update({
+            where: { id: existingMsg.id },
+            data: {
+              message: { conversation: newBody },
+            },
+          });
+
+          await this.prismaRepository.messageUpdate.create({
+            data: {
+              keyId,
+              remoteJid: msg.from || msg.to,
+              fromMe: msg.fromMe ?? false,
+              status: 'EDITED',
+              messageId: existingMsg.id,
+              instanceId: this.instanceId,
+            },
+          });
+        }
+
+        this.sendDataWebhook(Events.MESSAGES_EDITED, {
+          key: {
+            remoteJid: msg.from || msg.to,
+            fromMe: msg.fromMe,
+            id: keyId,
+          },
+          message: { conversation: newBody },
+          oldMessage: { conversation: prevBody },
+          messageTimestamp: msg.timestamp,
+          instanceId: this.instanceId,
+        });
+      } catch (error) {
+        this.logger.error(`Error handling message edit: ${error}`);
+      }
+    });
+
+    this.wwebClient.on('message_reaction', async (reaction: any) => {
+      try {
+        this.sendDataWebhook(Events.MESSAGES_UPDATE, {
+          key: {
+            remoteJid: reaction.senderId,
+            fromMe: false,
+            id: reaction.msgId?._serialized || reaction.msgId?.id,
+          },
+          reaction: {
+            text: reaction.reaction,
+            senderId: reaction.senderId,
+            timestamp: reaction.timestamp,
+          },
+          instanceId: this.instanceId,
+        });
+      } catch (error) {
+        this.logger.error(`Error handling message reaction: ${error}`);
+      }
+    });
+  }
+
+  // =====================================================
+  // MESSAGE PROCESSING - incoming message pipeline
+  // =====================================================
+
+  private mapWWebJSTypeToMessageType(type: string, msg: any): string {
+    const typeMap: Record<string, string> = {
+      chat: 'conversation',
+      image: 'imageMessage',
+      video: 'videoMessage',
+      audio: 'audioMessage',
+      ptt: 'audioMessage',
+      document: 'documentMessage',
+      sticker: 'stickerMessage',
+      location: 'locationMessage',
+      vcard: 'contactMessage',
+      multi_vcard: 'contactsArrayMessage',
+      poll_creation: 'pollCreationMessage',
+      revoked: 'protocolMessage',
+      reaction: 'reactionMessage',
+    };
+
+    if (type === 'ptt' && msg) return 'audioMessage';
+    return typeMap[type] || type || 'unknown';
+  }
+
+  private mapAckToStatus(ack: number): wa.StatusMessage {
+    const ackMap: Record<number, wa.StatusMessage> = {
+      [-1]: 'ERROR',
+      0: 'PENDING',
+      1: 'SERVER_ACK',
+      2: 'DELIVERY_ACK',
+      3: 'READ',
+      4: 'PLAYED',
+    };
+    return ackMap[ack] || 'PENDING';
+  }
+
+  private buildMessageContent(msg: any): Record<string, any> {
+    const type = msg.type;
+
+    switch (type) {
+      case 'chat':
+        return { conversation: msg.body || '' };
+
+      case 'image':
+      case 'video':
+      case 'document':
+      case 'audio':
+      case 'ptt': {
+        const mediaKey = type === 'ptt' ? 'audioMessage' : `${type}Message`;
+        return {
+          [mediaKey]: {
+            caption: msg.body || undefined,
+            mimetype: msg._data?.mimetype || undefined,
+            fileName: msg._data?.filename || undefined,
+            ptt: type === 'ptt' ? true : undefined,
+            seconds: msg.duration ? parseInt(msg.duration) : undefined,
+          },
+        };
+      }
+
+      case 'sticker':
+        return {
+          stickerMessage: {
+            mimetype: msg._data?.mimetype || 'image/webp',
+            isAnimated: msg.isGif || false,
+          },
+        };
+
+      case 'location':
+        return {
+          locationMessage: {
+            degreesLatitude: msg.location?.latitude,
+            degreesLongitude: msg.location?.longitude,
+            name: msg.location?.description || msg.body || undefined,
+          },
+        };
+
+      case 'vcard':
+        return {
+          contactMessage: {
+            vcard: msg.vCards?.[0] || msg.body || '',
+          },
+        };
+
+      case 'multi_vcard':
+        return {
+          contactsArrayMessage: {
+            contacts: (msg.vCards || []).map((vcard: string) => ({
+              vcard,
+            })),
+          },
+        };
+
+      case 'poll_creation':
+        return {
+          pollCreationMessage: {
+            name: msg.pollName || msg.body || '',
+            options: (msg.pollOptions || []).map((opt: any) => ({
+              optionName: typeof opt === 'string' ? opt : opt.name,
+            })),
+          },
+        };
+
+      default:
+        return { conversation: msg.body || '' };
+    }
+  }
+
+  private prepareMessage(msg: any): any {
+    const messageType = this.mapWWebJSTypeToMessageType(msg.type, msg);
+    const messageContent = this.buildMessageContent(msg);
+
+    const remoteJid = msg.fromMe
+      ? (msg.to || '').replace(/^(\d+)$/, '$1@s.whatsapp.net')
+      : (msg.from || '').replace(/^(\d+)$/, '$1@s.whatsapp.net');
+
+    const messageRaw: any = {
+      key: {
+        remoteJid,
+        fromMe: msg.fromMe || false,
+        id: msg.id?._serialized || msg.id?.id || v4(),
+        participant: msg.author || undefined,
+      },
+      pushName: msg._data?.notifyName || msg._data?.pushname || (msg.fromMe ? 'Você' : undefined),
+      status: this.mapAckToStatus(msg.ack ?? 0),
+      message: messageContent,
+      contextInfo: undefined as any,
+      messageType,
+      messageTimestamp: msg.timestamp || Math.floor(Date.now() / 1000),
+      instanceId: this.instanceId,
+      source: 'web',
+    };
+
+    if (msg.hasQuotedMsg && msg._data?.quotedMsg) {
+      messageRaw.contextInfo = {
+        quotedMessage: {
+          conversation: msg._data.quotedMsg.body || '',
+        },
+        stanzaId: msg._data.quotedStanzaID,
+        participant: msg._data.quotedParticipant,
+      };
+    }
+
+    if (msg.mentionedIds?.length > 0) {
+      messageRaw.contextInfo = messageRaw.contextInfo || {};
+      messageRaw.contextInfo.mentionedJid = msg.mentionedIds;
+    }
+
+    if (msg.isForwarded) {
+      messageRaw.contextInfo = messageRaw.contextInfo || {};
+      messageRaw.contextInfo.isForwarded = true;
+      messageRaw.contextInfo.forwardingScore = msg.forwardingScore || 1;
+    }
+
+    return messageRaw;
+  }
+
+  private async handleIncomingMessage(msg: any) {
+    const messageRaw = this.prepareMessage(msg);
+    const isMedia = TypeMediaMessage.includes(messageRaw.messageType);
+    const isFromMe = msg.fromMe === true;
+
+    if (!isFromMe && this.localSettings.readMessages) {
+      try {
+        const chat = await msg.getChat();
+        await chat.sendSeen();
+      } catch {
+        // ignore read receipt errors
+      }
+    }
+
+    // Chatwoot integration
+    if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+      const chatwootResult = await this.chatwootService.eventWhatsapp(
+        Events.MESSAGES_UPSERT,
+        { instanceName: this.instance.name, instanceId: this.instanceId },
+        messageRaw,
+      );
+
+      if (chatwootResult?.id) {
+        messageRaw.chatwootMessageId = chatwootResult.id;
+        messageRaw.chatwootInboxId = chatwootResult.inboxId;
+        messageRaw.chatwootConversationId = chatwootResult.conversationId;
+      }
+    }
+
+    // Save to database
+    const db = this.configService.get<Database>('DATABASE');
+    if (db.SAVE_DATA.NEW_MESSAGE) {
+      try {
+        await this.prismaRepository.message.create({
+          data: {
+            key: messageRaw.key,
+            pushName: messageRaw.pushName,
+            participant: messageRaw.key.participant,
+            messageType: messageRaw.messageType,
+            message: messageRaw.message,
+            contextInfo: messageRaw.contextInfo,
+            source: messageRaw.source,
+            messageTimestamp: messageRaw.messageTimestamp,
+            instanceId: this.instanceId,
+            status: messageRaw.status,
+            chatwootMessageId: messageRaw.chatwootMessageId ? parseInt(messageRaw.chatwootMessageId) : null,
+            chatwootInboxId: messageRaw.chatwootInboxId ? parseInt(messageRaw.chatwootInboxId) : null,
+            chatwootConversationId: messageRaw.chatwootConversationId
+              ? parseInt(messageRaw.chatwootConversationId)
+              : null,
+          },
+        });
+      } catch (error) {
+        this.logger.error(`Error saving message to database: ${error}`);
+      }
+    }
+
+    // Media download + S3 upload
+    if (isMedia && msg.hasMedia) {
+      try {
+        const media = await msg.downloadMedia();
+        if (media) {
+          const s3Config = this.configService.get<S3>('S3');
+          if (s3Config?.ENABLE) {
+            const buffer = Buffer.from(media.data, 'base64');
+            const ext = media.mimetype?.split('/')?.[1]?.split(';')?.[0] || 'bin';
+            const fullName = `${this.instanceId}/${messageRaw.messageType}/${messageRaw.key.id}.${ext}`;
+
+            await s3Service.uploadFile(fullName, buffer, buffer.length, {
+              'Content-Type': media.mimetype,
+            });
+
+            const mediaUrl = await s3Service.getObjectUrl(fullName);
+            messageRaw.message.mediaUrl = mediaUrl;
+
+            await this.prismaRepository.media.create({
+              data: {
+                messageId: messageRaw.key.id,
+                instanceId: this.instanceId,
+                type: messageRaw.messageType,
+                fileName: media.filename || `${messageRaw.key.id}.${ext}`,
+                mimetype: media.mimetype,
+              },
+            });
+
+            if (db.SAVE_DATA.NEW_MESSAGE) {
+              await this.prismaRepository.message.updateMany({
+                where: {
+                  instanceId: this.instanceId,
+                  key: { path: ['id'], equals: messageRaw.key.id },
+                },
+                data: { message: { ...messageRaw.message, mediaUrl } },
+              });
+            }
+          }
+
+          // Webhook base64
+          if (this.localWebhook.enabled && this.localWebhook.webhookBase64) {
+            messageRaw.message.base64 = media.data;
+          }
+        }
+      } catch (error) {
+        this.logger.error(`Error processing media: ${error}`);
+      }
+    }
+
+    // Save chat
+    if (db.SAVE_DATA.CHATS) {
+      try {
+        const chat = await msg.getChat();
+        const remoteJid = messageRaw.key.remoteJid;
+
+        await this.prismaRepository.chat.upsert({
+          where: {
+            instanceId_remoteJid: {
+              instanceId: this.instanceId,
+              remoteJid,
+            },
+          },
+          create: {
+            remoteJid,
+            name: chat.name || remoteJid.split('@')[0],
+            instanceId: this.instanceId,
+          },
+          update: {
+            name: chat.name || undefined,
+          },
+        });
+      } catch (error) {
+        this.logger.error(`Error saving chat: ${error}`);
+      }
+    }
+
+    // Telemetry
+    const telemetryAction = isFromMe ? 'sent' : 'received';
+    sendTelemetry(`${telemetryAction}.message.${messageRaw.messageType ?? 'unknown'}`);
+
+    // Webhook
+    this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
+
+    // Chatbot emit — only for incoming messages
+    if (!isFromMe) {
+      await chatbotController.emit({
+        instance: { instanceName: this.instance.name, instanceId: this.instanceId },
+        remoteJid: messageRaw.key.remoteJid,
+        msg: messageRaw,
+        pushName: messageRaw.pushName,
+      });
+    }
+
+    // Contact save
+    if (db.SAVE_DATA.CONTACTS && !isFromMe) {
+      try {
+        const contact = await msg.getContact();
+        const contactJid = messageRaw.key.remoteJid;
+
+        await this.prismaRepository.contact.upsert({
+          where: {
+            remoteJid_instanceId: {
+              remoteJid: contactJid,
+              instanceId: this.instanceId,
+            },
+          },
+          create: {
+            remoteJid: contactJid,
+            pushName: contact?.pushname || messageRaw.pushName,
+            profilePicUrl: null,
+            instanceId: this.instanceId,
+          },
+          update: {
+            pushName: contact?.pushname || messageRaw.pushName || undefined,
+          },
+        });
+
+        this.sendDataWebhook(Events.CONTACTS_UPSERT, {
+          id: contactJid,
+          pushName: contact?.pushname || messageRaw.pushName,
+        });
+      } catch (error) {
+        this.logger.error(`Error saving contact: ${error}`);
+      }
+    }
   }
 
   // =====================================================

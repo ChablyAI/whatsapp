@@ -146,35 +146,47 @@
 ## Aşama 3 - Mesaj Alma ve İşleme
 
 ### Gelen Mesaj İşleme
-- [ ] `messages.upsert` handler → `message` / `message_create` eventi
-  - Baileys: `messageHandle['messages.upsert']`
-  - wwebjs: `client.on('message', msg => ...)` / `client.on('message_create', msg => ...)`
-- [ ] Mesaj normalize etme (`prepareMessage`)
-  - wwebjs mesaj yapısı farklı — adapter yazılmalı
-- [ ] Gelen medya indirme
-  - Baileys: `downloadMediaMessage()`
-  - wwebjs: `message.downloadMedia()` → `MessageMedia` objesi
-- [ ] Medya S3/MinIO yükleme entegrasyonu
-- [ ] OpenAI speech-to-text (ses mesajları)
-- [ ] Chatbot emit (chatbotController.emit)
-- [ ] Chatwoot entegrasyonu
-- [ ] Webhook gönderimi (`sendDataWebhook`)
-- [ ] Telemetri gönderimi
+- [x] `messages.upsert` handler → `message` / `message_create` eventi
+  - wwebjs: `client.on('message', msg => ...)` ile gelen mesaj handler'ı
+- [x] Mesaj normalize etme (`prepareMessage`)
+  - `prepareMessage(msg)`: wwebjs Message → Baileys uyumlu `messageRaw` dönüşümü
+  - `mapWWebJSTypeToMessageType()`: chat→conversation, image→imageMessage, vb.
+  - `buildMessageContent()`: Mesaj içeriğini Baileys formatına dönüştürme
+- [x] Gelen medya indirme
+  - wwebjs: `message.downloadMedia()` → `MessageMedia` objesi (base64)
+- [x] Medya S3/MinIO yükleme entegrasyonu
+  - S3 aktifse medya otomatik yükleniyor ve `mediaUrl` oluşturuluyor
+- [ ] OpenAI speech-to-text (ses mesajları) — Aşama 7'de entegrasyon ile birlikte
+- [x] Chatbot emit (chatbotController.emit)
+  - Tüm chatbot entegrasyonları (EvolutionBot, Typebot, OpenAI, Dify, N8N, EvoAI, Flowise) tetikleniyor
+- [x] Chatwoot entegrasyonu
+  - Chatwoot aktifse mesaj senkronizasyonu yapılıyor
+- [x] Webhook gönderimi (`sendDataWebhook`)
+  - `Events.MESSAGES_UPSERT` webhook'u gönderiliyor
+- [x] Telemetri gönderimi
+  - `sendTelemetry()` ile mesaj tipi loglanıyor
+- [x] Kişi kaydetme (Contact upsert)
+- [x] Sohbet kaydetme (Chat upsert)
 
 ### Mesaj Güncellemeleri
-- [ ] `messages.update` handler → `message_ack` eventi
-  - Baileys: Mesaj durumu (delivered, read, vb.)
+- [x] `messages.update` handler → `message_ack` eventi
   - wwebjs: `client.on('message_ack', (msg, ack) => ...)`
-- [ ] Mesaj silme olayları
-  - Baileys: `messages.update` + protocolMessage
-  - wwebjs: `client.on('message_revoke_everyone')` + `client.on('message_revoke_me')`
-- [ ] Mesaj düzenleme olayları
+  - ACK seviyeleri: ERROR(-1), PENDING(0), SERVER_ACK(1), DELIVERY_ACK(2), READ(3), PLAYED(4)
+  - DB'de `MessageUpdate` kaydı oluşturuluyor
+- [x] Mesaj silme olayları
+  - wwebjs: `client.on('message_revoke_everyone', (revokedMsg, oldMsg) => ...)`
+  - DB'de logical delete (status: 'DELETED')
+  - `Events.MESSAGES_DELETE` webhook'u
+- [x] Mesaj düzenleme olayları
   - wwebjs: `client.on('message_edit', (msg, newBody, prevBody) => ...)`
+  - DB'de mesaj güncelleme + `MessageUpdate` kaydı (status: 'EDITED')
+  - `Events.MESSAGES_EDITED` webhook'u
+- [x] Mesaj tepki (reaction) olayları
+  - wwebjs: `client.on('message_reaction', reaction => ...)`
+  - `Events.MESSAGES_UPDATE` webhook'u
 
 ### Okunma Bildirimleri
-- [ ] `message-receipt.update` → `message_ack` eventi
-  - Baileys: Receipt update handler
-  - wwebjs: ACK seviyeleri (PENDING, SERVER, DEVICE, READ, PLAYED)
+- [x] `message-receipt.update` → `message_ack` eventi (yukarıdaki message_ack ile birleşik)
 
 ### Anket İşleme
 - [ ] Anket oyu çözme (decrypt)
@@ -484,7 +496,7 @@ src/api/integrations/channel/
 |-------|-------|----------|
 | 1 - Temel Altyapı | ✅ Tamamlandı | 100% |
 | 2 - Mesaj Gönderme | ⬜ Bekliyor | 0% |
-| 3 - Mesaj Alma | ⬜ Bekliyor | 0% |
+| 3 - Mesaj Alma | 🟡 Devam Ediyor | 85% |
 | 4 - Grup Yönetimi | ⬜ Bekliyor | 0% |
 | 5 - Profil & Kişi | ⬜ Bekliyor | 0% |
 | 6 - Gelişmiş Özellikler | ⬜ Bekliyor | 0% |
