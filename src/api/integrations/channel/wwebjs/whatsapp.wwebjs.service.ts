@@ -322,7 +322,8 @@ export class WWebJSStartupService extends ChannelStartupService {
       this.endSession = false;
 
       const info = this.wwebClient.info;
-      this.instance.wuid = info?.wid?._serialized || info?.wid?.user;
+      const rawWuid = info?.wid?._serialized || info?.wid?.user;
+      this.instance.wuid = rawWuid ? this.normalizeJid(rawWuid) : rawWuid;
       this.instance.profileName = info?.pushname;
 
       this.stateConnection = {
@@ -457,6 +458,7 @@ export class WWebJSStartupService extends ChannelStartupService {
       try {
         const ackStatus = this.mapAckToStatus(ack);
         const keyId = msg.id?._serialized || msg.id?.id;
+        const normalizedJid = this.normalizeJid(msg.from || msg.to);
 
         if (this.configService.get<Database>('DATABASE').SAVE_DATA.MESSAGE_UPDATE) {
           const existingMsg = await this.prismaRepository.message.findFirst({
@@ -470,7 +472,7 @@ export class WWebJSStartupService extends ChannelStartupService {
             await this.prismaRepository.messageUpdate.create({
               data: {
                 keyId,
-                remoteJid: msg.from || msg.to,
+                remoteJid: normalizedJid,
                 fromMe: msg.fromMe ?? false,
                 status: ackStatus,
                 messageId: existingMsg.id,
@@ -482,7 +484,7 @@ export class WWebJSStartupService extends ChannelStartupService {
 
         this.sendDataWebhook(Events.MESSAGES_UPDATE, {
           key: {
-            remoteJid: msg.from || msg.to,
+            remoteJid: normalizedJid,
             fromMe: msg.fromMe,
             id: keyId,
           },
@@ -510,7 +512,7 @@ export class WWebJSStartupService extends ChannelStartupService {
 
         this.sendDataWebhook(Events.MESSAGES_DELETE, {
           key: {
-            remoteJid: revokedMsg.from || revokedMsg.to,
+            remoteJid: this.normalizeJid(revokedMsg.from || revokedMsg.to),
             fromMe: revokedMsg.fromMe,
             id: keyId,
           },
@@ -541,10 +543,11 @@ export class WWebJSStartupService extends ChannelStartupService {
             },
           });
 
+          const editJid = this.normalizeJid(msg.from || msg.to);
           await this.prismaRepository.messageUpdate.create({
             data: {
               keyId,
-              remoteJid: msg.from || msg.to,
+              remoteJid: editJid,
               fromMe: msg.fromMe ?? false,
               status: 'EDITED',
               messageId: existingMsg.id,
@@ -555,7 +558,7 @@ export class WWebJSStartupService extends ChannelStartupService {
 
         this.sendDataWebhook(Events.MESSAGES_EDITED, {
           key: {
-            remoteJid: msg.from || msg.to,
+            remoteJid: this.normalizeJid(msg.from || msg.to),
             fromMe: msg.fromMe,
             id: keyId,
           },
@@ -573,13 +576,13 @@ export class WWebJSStartupService extends ChannelStartupService {
       try {
         this.sendDataWebhook(Events.MESSAGES_UPDATE, {
           key: {
-            remoteJid: reaction.senderId,
+            remoteJid: this.normalizeJid(reaction.senderId),
             fromMe: false,
             id: reaction.msgId?._serialized || reaction.msgId?.id,
           },
           reaction: {
             text: reaction.reaction,
-            senderId: reaction.senderId,
+            senderId: this.normalizeJid(reaction.senderId),
             timestamp: reaction.timestamp,
           },
           instanceId: this.instanceId,
@@ -699,20 +702,27 @@ export class WWebJSStartupService extends ChannelStartupService {
     }
   }
 
+  private normalizeJid(jid: string): string {
+    if (!jid) return jid;
+    if (jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@lid')) {
+      return jid;
+    }
+    return jid.replace(/@c\.us$/, '@s.whatsapp.net').replace(/^(\d+)$/, '$1@s.whatsapp.net');
+  }
+
   private prepareMessage(msg: any): any {
     const messageType = this.mapWWebJSTypeToMessageType(msg.type, msg);
     const messageContent = this.buildMessageContent(msg);
 
-    const remoteJid = msg.fromMe
-      ? (msg.to || '').replace(/^(\d+)$/, '$1@s.whatsapp.net')
-      : (msg.from || '').replace(/^(\d+)$/, '$1@s.whatsapp.net');
+    const rawJid = msg.fromMe ? msg.to || '' : msg.from || '';
+    const remoteJid = this.normalizeJid(rawJid);
 
     const messageRaw: any = {
       key: {
         remoteJid,
         fromMe: msg.fromMe || false,
         id: msg.id?._serialized || msg.id?.id || v4(),
-        participant: msg.author || undefined,
+        participant: msg.author ? this.normalizeJid(msg.author) : undefined,
       },
       pushName: msg._data?.notifyName || msg._data?.pushname || (msg.fromMe ? 'Você' : undefined),
       status: this.mapAckToStatus(msg.ack ?? 0),
@@ -730,13 +740,13 @@ export class WWebJSStartupService extends ChannelStartupService {
           conversation: msg._data.quotedMsg.body || '',
         },
         stanzaId: msg._data.quotedStanzaID,
-        participant: msg._data.quotedParticipant,
+        participant: msg._data.quotedParticipant ? this.normalizeJid(msg._data.quotedParticipant) : undefined,
       };
     }
 
     if (msg.mentionedIds?.length > 0) {
       messageRaw.contextInfo = messageRaw.contextInfo || {};
-      messageRaw.contextInfo.mentionedJid = msg.mentionedIds;
+      messageRaw.contextInfo.mentionedJid = msg.mentionedIds.map((id: string) => this.normalizeJid(id));
     }
 
     if (msg.isForwarded) {
