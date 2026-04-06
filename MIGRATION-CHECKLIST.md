@@ -35,7 +35,7 @@
   - wwebjs: `client.requestPairingCode(phoneNumber)`
 - [x] Oturum kalıcılığı (session persistence)
   - Baileys: Custom auth state (Prisma/Redis/file)
-  - wwebjs: `LocalAuth` + `PrismaAuthStrategy` yazıldı
+  - wwebjs: `RemoteAuth` + `PrismaRemoteStore` (veritabanı tabanlı, Baileys ile aynı yaklaşım)
 - [x] Otomatik yeniden bağlanma (reconnection)
   - Baileys: `connection.update` → `lastDisconnect` + retry
   - wwebjs: `client.on('disconnected')` + otomatik reconnect (NAVIGATION/CONFLICT)
@@ -378,7 +378,7 @@
 ### Veritabanı
 - [ ] Prisma message/contact/chat/label CRUD
 - [ ] Mesaj güncelleme/silme kayıtları
-- [x] Oturum/auth state kalıcılığı (custom AuthStrategy) ✅ Aşama 1'de tamamlandı
+- [x] Oturum/auth state kalıcılığı (`RemoteAuth` + `PrismaRemoteStore` — veritabanı tabanlı) ✅ Aşama 1'de tamamlandı
 
 ---
 
@@ -460,7 +460,7 @@ src/api/integrations/channel/
 │   └── voiceCalls/                          # Mevcut (VoIP)
 ├── wwebjs/                                  # ✅ YENİ — whatsapp-web.js
 │   ├── whatsapp.wwebjs.service.ts           # ✅ Ana servis (Aşama 1 tamamlandı)
-│   ├── wwebjs.auth-strategy.ts              # ✅ Özel auth stratejisi (Prisma/Redis)
+│   ├── wwebjs.prisma-store.ts               # ✅ RemoteAuth store (veritabanı oturum depolama)
 │   ├── wwebjs.message-processor.ts          # 🔜 Mesaj işleme kuyruğu (Aşama 3)
 │   └── wwebjs.helpers.ts                    # 🔜 Yardımcı fonksiyonlar
 ├── meta/                                    # Meta Business API (mevcut)
