@@ -55,15 +55,16 @@ import { Message } from '@prisma/client';
 import EventEmitter2 from 'eventemitter2';
 import qrcode, { QRCodeToDataURLOptions } from 'qrcode';
 
-import { PrismaAuthStrategy } from './wwebjs.auth-strategy';
+import { PrismaRemoteStore } from './wwebjs.prisma-store';
 
-let WAWebJS: typeof import('whatsapp-web.js');
+let wwebjsModule: any;
 
 async function loadWWebJS() {
-  if (!WAWebJS) {
-    WAWebJS = await import('whatsapp-web.js');
+  if (!wwebjsModule) {
+    const mod: any = await import('whatsapp-web.js');
+    wwebjsModule = mod.default || mod;
   }
-  return WAWebJS;
+  return wwebjsModule;
 }
 
 export class WWebJSStartupService extends ChannelStartupService {
@@ -82,7 +83,7 @@ export class WWebJSStartupService extends ChannelStartupService {
 
   public readonly logger = new Logger('WWebJSStartupService');
   private wwebClient: any = null;
-  private authStrategy: PrismaAuthStrategy;
+  private remoteStore: PrismaRemoteStore;
   private endSession = false;
 
   public stateConnection: wa.StateConnection = { state: 'close' };
@@ -145,8 +146,9 @@ export class WWebJSStartupService extends ChannelStartupService {
 
     this.wwebClient = null;
 
-    this.authStrategy = new PrismaAuthStrategy(this.instanceId, this.prismaRepository, this.cache);
-    await this.authStrategy.removeSession();
+    if (this.remoteStore) {
+      await this.remoteStore.delete({ session: this.instanceId });
+    }
   }
 
   private async destroyClient() {
@@ -161,9 +163,7 @@ export class WWebJSStartupService extends ChannelStartupService {
   }
 
   private async createClient(number?: string): Promise<any> {
-    const { Client, LocalAuth } = await loadWWebJS();
-
-    this.authStrategy = new PrismaAuthStrategy(this.instanceId, this.prismaRepository, this.cache);
+    this.remoteStore = new PrismaRemoteStore(this.instanceId, this.prismaRepository, this.cache);
 
     if (number || this.phoneNumber) {
       this.phoneNumber = number || this.phoneNumber;
@@ -188,8 +188,14 @@ export class WWebJSStartupService extends ChannelStartupService {
       );
     }
 
-    this.wwebClient = new Client({
-      authStrategy: new LocalAuth({ clientId: this.instanceId }),
+    const wwebjs = await loadWWebJS();
+
+    this.wwebClient = new wwebjs.Client({
+      authStrategy: new wwebjs.RemoteAuth({
+        clientId: this.instanceId,
+        store: this.remoteStore,
+        backupSyncIntervalMs: 300000,
+      }),
       puppeteer: puppeteerOptions,
       qrMaxRetries: this.configService.get<QrCode>('QRCODE').LIMIT || 6,
     });
@@ -360,6 +366,10 @@ export class WWebJSStartupService extends ChannelStartupService {
 
     this.wwebClient.on('change_state', (state: string) => {
       this.logger.info(`Connection state changed: ${state}`);
+    });
+
+    this.wwebClient.on('remote_session_saved', () => {
+      this.logger.info(`Remote session saved to database for instance: ${this.instanceName}`);
     });
   }
 

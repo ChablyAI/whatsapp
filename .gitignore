@@ -46,3 +46,7 @@ lerna-debug.log*
 .tool-versions
 
 /prisma/migrations/*
+
+# whatsapp-web.js session data
+.wwebjs_auth/
+.wwebjs_cache/
