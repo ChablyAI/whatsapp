@@ -56,6 +56,7 @@ import { BadRequestException, InternalServerErrorException } from '@exceptions';
 import { Message } from '@prisma/client';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import EventEmitter2 from 'eventemitter2';
+import * as path from 'path';
 import qrcode, { QRCodeToDataURLOptions } from 'qrcode';
 import { v4 } from 'uuid';
 
@@ -115,6 +116,7 @@ export class WWebJSStartupService extends ChannelStartupService {
   // =====================================================
 
   public async connectToWhatsapp(number?: string): Promise<any> {
+    this.logger.info(`[connectToWhatsapp] === Connecting instance: ${this.instanceName} (id: ${this.instanceId}) ===`);
     try {
       this.loadChatwoot();
       this.loadSettings();
@@ -132,59 +134,258 @@ export class WWebJSStartupService extends ChannelStartupService {
         data: { connectionStatus: 'connecting' },
       });
 
+      this.logger.info(`[connectToWhatsapp] Status set to "connecting", calling createClient...`);
       return await this.createClient(number);
     } catch (error) {
-      this.logger.error(error);
+      this.logger.error(`[connectToWhatsapp] Failed: ${error}`);
       throw new InternalServerErrorException(error?.toString());
     }
   }
 
   public async reloadConnection(): Promise<any> {
+    this.logger.info(`[reloadConnection] Reloading connection for instance: ${this.instanceName}`);
     try {
       await this.destroyClient();
       return await this.createClient(this.phoneNumber);
     } catch (error) {
-      this.logger.error(error);
+      this.logger.error(`[reloadConnection] Failed: ${error}`);
       throw new InternalServerErrorException(error?.toString());
     }
   }
 
   public async logoutInstance() {
+    this.logger.info(`[logout] Starting logout for instance: ${this.instanceName}`);
     try {
       if (this.wwebClient) {
+        this.logger.info(`[logout] Calling wwebClient.logout()...`);
         await this.wwebClient.logout();
+        this.logger.info(`[logout] Calling wwebClient.destroy()...`);
         await this.wwebClient.destroy();
       }
     } catch (error) {
-      this.logger.error(`Error during logout: ${error}`);
+      this.logger.error(`[logout] Error during logout: ${error}`);
     }
 
     this.wwebClient = null;
 
+    const fsModule = await import('fs');
+    const localDir = this.getLocalAuthDir();
+    if (fsModule.existsSync(localDir)) {
+      this.logger.info(`[logout] Removing local session dir: ${localDir}`);
+      fsModule.rmSync(localDir, { recursive: true, force: true });
+    }
+
     if (this.remoteStore) {
-      await this.remoteStore.delete({ session: this.instanceId });
+      this.logger.info(`[logout] Removing session from DB...`);
+      await this.remoteStore.delete({ session: `session-${this.instanceId}` });
+    }
+    this.logger.info(`[logout] Logout completed for instance: ${this.instanceName}`);
+  }
+
+  public async saveSessionNow(): Promise<void> {
+    this.logger.info(
+      `[saveSessionNow] Starting for instance: ${this.instanceName} (LocalAuth — session persists on disk)`,
+    );
+
+    const fsModule = await import('fs');
+    const localDir = this.getLocalAuthDir();
+    const dirExists = fsModule.existsSync(localDir);
+    this.logger.info(`[saveSessionNow] Local session dir exists: ${dirExists} (${localDir})`);
+
+    if (dirExists) {
+      try {
+        const entries = fsModule.readdirSync(localDir);
+        this.logger.info(
+          `[saveSessionNow] Local dir contents (${entries.length} entries): ${entries.slice(0, 10).join(', ')}${entries.length > 10 ? '...' : ''}`,
+        );
+      } catch (e) {
+        this.logger.warn(`[saveSessionNow] Could not read local dir: ${e}`);
+      }
+    }
+
+    try {
+      await this.backupSessionToDB();
+      this.logger.info(`[saveSessionNow] DB backup completed for instance: ${this.instanceName}`);
+    } catch (error) {
+      this.logger.error(`[saveSessionNow] DB backup failed: ${error}`);
     }
   }
 
   private async destroyClient() {
+    this.logger.info(`[destroyClient] Destroying client for instance: ${this.instanceName}`);
     if (this.wwebClient) {
       try {
         await this.wwebClient.destroy();
+        this.logger.info(`[destroyClient] Client destroyed successfully`);
       } catch (error) {
-        this.logger.error(`Error destroying client: ${error}`);
+        this.logger.error(`[destroyClient] Error destroying client: ${error}`);
       }
       this.wwebClient = null;
+    } else {
+      this.logger.info(`[destroyClient] No wwebClient to destroy`);
     }
   }
 
-  private async createClient(number?: string): Promise<any> {
+  private getLocalAuthDir(): string {
+    return path.resolve(`.wwebjs_auth/session-${this.instanceId}`);
+  }
+
+  private async restoreSessionFromDB(): Promise<boolean> {
+    const fsModule = await import('fs');
+    const localDir = this.getLocalAuthDir();
+
+    this.logger.info(`[restoreSessionFromDB] Checking local dir: ${localDir}`);
+
+    if (fsModule.existsSync(localDir)) {
+      try {
+        const entries = fsModule.readdirSync(localDir);
+        this.logger.info(
+          `[restoreSessionFromDB] Local session dir EXISTS (${entries.length} entries: ${entries.slice(0, 8).join(', ')}${entries.length > 8 ? '...' : ''}) — skipping DB restore`,
+        );
+      } catch {
+        this.logger.info(`[restoreSessionFromDB] Local session dir EXISTS — skipping DB restore`);
+      }
+      return true;
+    }
+
+    this.logger.info(`[restoreSessionFromDB] Local dir NOT found — checking DB for backup...`);
+
     this.remoteStore = new PrismaRemoteStore(this.instanceId, this.prismaRepository, this.cache);
+    const hasDbSession = await this.remoteStore.sessionExists({ session: `session-${this.instanceId}` });
+
+    if (!hasDbSession) {
+      this.logger.info(`[restoreSessionFromDB] No session in DB either — QR code will be required`);
+      return false;
+    }
+
+    this.logger.info(`[restoreSessionFromDB] Session FOUND in DB — starting restore...`);
+
+    try {
+      const pathModule = await import('path');
+      const dataPath = pathModule.default.resolve('./.wwebjs_auth');
+      const zipPath = pathModule.default.join(dataPath, `session-${this.instanceId}.zip`);
+
+      this.logger.info(`[restoreSessionFromDB] Extracting session zip to: ${zipPath}`);
+      await this.remoteStore.extract({ session: `session-${this.instanceId}`, path: zipPath });
+
+      if (!fsModule.existsSync(zipPath)) {
+        this.logger.warn(`[restoreSessionFromDB] Zip extraction failed — no file at ${zipPath}`);
+        return false;
+      }
+
+      const zipStats = fsModule.statSync(zipPath);
+      this.logger.info(`[restoreSessionFromDB] Zip file size: ${(zipStats.size / 1024).toFixed(1)} KB`);
+
+      const unzipper = await import('unzipper');
+      fsModule.mkdirSync(localDir, { recursive: true });
+
+      this.logger.info(`[restoreSessionFromDB] Unzipping to: ${localDir}`);
+      await new Promise<void>((resolve, reject) => {
+        fsModule
+          .createReadStream(zipPath)
+          .pipe(unzipper.default.Extract({ path: localDir }))
+          .on('close', resolve)
+          .on('error', reject);
+      });
+
+      fsModule.unlinkSync(zipPath);
+
+      const restoredEntries = fsModule.readdirSync(localDir);
+      this.logger.info(
+        `[restoreSessionFromDB] Session restored successfully to ${localDir} (${restoredEntries.length} entries: ${restoredEntries.slice(0, 8).join(', ')}${restoredEntries.length > 8 ? '...' : ''})`,
+      );
+      return true;
+    } catch (error) {
+      this.logger.error(`[restoreSessionFromDB] Failed: ${error}`);
+      return false;
+    }
+  }
+
+  public async backupSessionToDB(): Promise<void> {
+    const fsModule = await import('fs');
+    const pathModule = await import('path');
+    const archiver = await import('archiver');
+
+    const localDir = this.getLocalAuthDir();
+    this.logger.info(`[backupSessionToDB] Starting backup for ${this.instanceName}, localDir: ${localDir}`);
+
+    if (!fsModule.existsSync(localDir)) {
+      this.logger.warn(`[backupSessionToDB] Local session dir not found: ${localDir} — nothing to backup`);
+      return;
+    }
+
+    try {
+      const entries = fsModule.readdirSync(localDir);
+      this.logger.info(
+        `[backupSessionToDB] Local dir has ${entries.length} entries: ${entries.slice(0, 10).join(', ')}${entries.length > 10 ? '...' : ''}`,
+      );
+    } catch (e) {
+      this.logger.warn(`[backupSessionToDB] Could not list local dir: ${e}`);
+    }
+
+    const dataPath = pathModule.default.resolve('./.wwebjs_auth');
+    const zipPath = pathModule.default.join(dataPath, `session-${this.instanceId}.zip`);
+
+    try {
+      this.logger.info(`[backupSessionToDB] Creating zip at: ${zipPath}`);
+      await new Promise<void>((resolve, reject) => {
+        const archive = archiver.default('zip', { zlib: { level: 5 } });
+        const stream = fsModule.createWriteStream(zipPath);
+        stream.on('close', () => resolve());
+        archive.on('error', reject);
+        archive.pipe(stream);
+        archive.directory(localDir, false);
+        archive.finalize();
+      });
+
+      const zipStats = fsModule.statSync(zipPath);
+      this.logger.info(`[backupSessionToDB] Zip created: ${(zipStats.size / 1024).toFixed(1)} KB`);
+
+      if (!this.remoteStore) {
+        this.remoteStore = new PrismaRemoteStore(this.instanceId, this.prismaRepository, this.cache);
+      }
+
+      this.logger.info(`[backupSessionToDB] Saving zip to DB...`);
+      await this.remoteStore.save({ session: pathModule.default.join(dataPath, `session-${this.instanceId}`) });
+
+      fsModule.unlinkSync(zipPath);
+      this.logger.info(`[backupSessionToDB] Backup completed successfully for ${this.instanceName}`);
+    } catch (error) {
+      this.logger.error(`[backupSessionToDB] Failed: ${error}`);
+      try {
+        if (fsModule.existsSync(zipPath)) fsModule.unlinkSync(zipPath);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  private async createClient(number?: string, isRetry = false): Promise<any> {
+    this.logger.info(`[createClient] === START === instance: ${this.instanceName}, isRetry: ${isRetry}`);
+
+    await this.restoreSessionFromDB();
+
+    const fsModule = await import('fs');
+    const localDir = this.getLocalAuthDir();
+    const hasLocalSession = fsModule.existsSync(localDir);
+
+    if (hasLocalSession) {
+      try {
+        const entries = fsModule.readdirSync(localDir);
+        this.logger.info(
+          `[createClient] LOCAL SESSION FOUND at ${localDir} (${entries.length} entries: ${entries.slice(0, 8).join(', ')}${entries.length > 8 ? '...' : ''}) — will auto-connect`,
+        );
+      } catch {
+        this.logger.info(`[createClient] LOCAL SESSION FOUND at ${localDir} — will auto-connect`);
+      }
+    } else {
+      this.logger.info(`[createClient] NO SESSION at ${localDir} — QR code will be required`);
+    }
 
     if (number || this.phoneNumber) {
       this.phoneNumber = number || this.phoneNumber;
     }
 
-    // @todo bu alanda headless true olarak ayarlanacak
     const puppeteerOptions: any = {
       headless: false,
       args: [
@@ -206,23 +407,62 @@ export class WWebJSStartupService extends ChannelStartupService {
 
     const wwebjs = await loadWWebJS();
 
+    this.logger.info(
+      `[createClient] Creating LocalAuth strategy with clientId: ${this.instanceId}, dataPath: ./.wwebjs_auth`,
+    );
+    const authStrategy = new wwebjs.LocalAuth({
+      clientId: this.instanceId,
+      dataPath: './.wwebjs_auth',
+    });
+
     this.wwebClient = new wwebjs.Client({
-      authStrategy: new wwebjs.RemoteAuth({
-        clientId: this.instanceId,
-        store: this.remoteStore,
-        backupSyncIntervalMs: 300000,
-      }),
+      authStrategy,
       puppeteer: puppeteerOptions,
       qrMaxRetries: this.configService.get<QrCode>('QRCODE').LIMIT || 6,
     });
 
     this.setupEventHandlers();
 
-    this.logger.info(`Initializing wwebjs client for instance: ${this.instanceName}`);
-    await this.wwebClient.initialize();
+    this.logger.info(`[createClient] Calling wwebClient.initialize() (LocalAuth)...`);
+
+    try {
+      await this.wwebClient.initialize();
+      this.logger.info(`[createClient] wwebClient.initialize() completed successfully`);
+    } catch (initError: any) {
+      this.logger.error(`[createClient] wwebClient.initialize() threw error: ${initError?.message || initError}`);
+
+      const isProtocolError =
+        initError?.message?.includes('Execution context was destroyed') ||
+        initError?.message?.includes('ProtocolError') ||
+        initError?.message?.includes('Session closed') ||
+        initError?.message?.includes('Target closed');
+
+      if (isProtocolError && !isRetry) {
+        this.logger.warn(`[createClient] ProtocolError detected — clearing stale session and retrying with QR code`);
+
+        try {
+          if (this.wwebClient) {
+            await this.wwebClient.destroy().catch(() => {});
+          }
+        } catch {
+          /* ignore */
+        }
+        this.wwebClient = null;
+
+        if (fsModule.existsSync(localDir)) {
+          this.logger.info(`[createClient] Removing stale local session dir: ${localDir}`);
+          fsModule.rmSync(localDir, { recursive: true, force: true });
+        }
+
+        return this.createClient(number, true);
+      }
+
+      throw initError;
+    }
 
     this.phoneNumber = number;
 
+    this.logger.info(`[createClient] === DONE === instance: ${this.instanceName}`);
     return this.wwebClient;
   }
 
@@ -298,11 +538,13 @@ export class WWebJSStartupService extends ChannelStartupService {
     });
 
     this.wwebClient.on('authenticated', () => {
-      this.logger.info(`Client authenticated for instance: ${this.instanceName}`);
+      this.logger.info(
+        `[event:authenticated] ✓ Client authenticated for instance: ${this.instanceName} — session is valid, waiting for "ready" event...`,
+      );
     });
 
     this.wwebClient.on('auth_failure', async (message: string) => {
-      this.logger.error(`Authentication failure: ${message}`);
+      this.logger.error(`[event:auth_failure] ✗ Authentication FAILED for ${this.instanceName}: ${message}`);
       this.stateConnection = { state: 'close' };
 
       await this.prismaRepository.instance.update({
@@ -318,7 +560,9 @@ export class WWebJSStartupService extends ChannelStartupService {
     });
 
     this.wwebClient.on('ready', async () => {
-      this.logger.info(`Client ready for instance: ${this.instanceName}`);
+      this.logger.info(
+        `[event:ready] ✓ Client READY for instance: ${this.instanceName} — WhatsApp connected successfully!`,
+      );
       this.endSession = false;
 
       const info = this.wwebClient.info;
@@ -372,10 +616,18 @@ export class WWebJSStartupService extends ChannelStartupService {
       if (this.localSettings.alwaysOnline) {
         await this.wwebClient.sendPresenceAvailable();
       }
+
+      this.logger.info(`[event:ready] Scheduling DB backup in 10 seconds...`);
+      setTimeout(() => {
+        this.logger.info(`[event:ready] Starting scheduled DB backup now...`);
+        this.backupSessionToDB().catch((err) => {
+          this.logger.error(`[event:ready] Scheduled DB backup failed: ${err}`);
+        });
+      }, 10000);
     });
 
     this.wwebClient.on('disconnected', async (reason: string) => {
-      this.logger.warn(`Client disconnected: ${reason}`);
+      this.logger.warn(`[event:disconnected] ✗ Client DISCONNECTED for ${this.instanceName}: ${reason}`);
       this.stateConnection = { state: 'close' };
 
       await this.prismaRepository.instance.update({
@@ -398,7 +650,7 @@ export class WWebJSStartupService extends ChannelStartupService {
     });
 
     this.wwebClient.on('change_state', async (state: string) => {
-      this.logger.info(`Connection state changed: ${state}`);
+      this.logger.info(`[event:change_state] State changed to "${state}" for ${this.instanceName}`);
 
       const stateMap: Record<string, string> = {
         CONNECTED: 'open',
@@ -432,7 +684,9 @@ export class WWebJSStartupService extends ChannelStartupService {
     });
 
     this.wwebClient.on('remote_session_saved', () => {
-      this.logger.info(`Remote session saved to database for instance: ${this.instanceName}`);
+      this.logger.info(
+        `Remote session saved to database for instance: ${this.instanceName} — session will persist across restarts`,
+      );
     });
 
     // =====================================================

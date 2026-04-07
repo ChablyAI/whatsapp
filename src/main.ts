@@ -163,6 +163,53 @@ async function bootstrap() {
     logger.error('Error loading instances: ' + error);
   });
 
+  let isShuttingDown = false;
+
+  const gracefulShutdown = async (signal: string) => {
+    if (isShuttingDown) {
+      logger.log(`${signal} received again — forcing exit`);
+      process.exit(1);
+    }
+    isShuttingDown = true;
+
+    logger.log(`${signal} received — saving sessions before shutdown...`);
+
+    const forceExitTimer = setTimeout(() => {
+      logger.warn('Shutdown timeout (15s) — forcing exit');
+      process.exit(1);
+    }, 15000);
+    forceExitTimer.unref();
+
+    try {
+      const instances = waMonitor.waInstances;
+      const savePromises: Promise<void>[] = [];
+
+      for (const [name, instance] of Object.entries(instances)) {
+        if (instance && typeof instance.saveSessionNow === 'function') {
+          logger.log(`Saving session for instance: ${name}`);
+          savePromises.push(
+            instance.saveSessionNow().catch((err: Error) => {
+              logger.error(`Failed to save session for ${name}: ${err.message}`);
+            }),
+          );
+        }
+      }
+
+      if (savePromises.length > 0) {
+        await Promise.allSettled(savePromises);
+        logger.log('All sessions saved — shutting down');
+      }
+    } catch (err) {
+      logger.error(`Error during shutdown: ${err}`);
+    }
+
+    clearTimeout(forceExitTimer);
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
   onUnexpectedError();
 }
 

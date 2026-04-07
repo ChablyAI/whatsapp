@@ -2,13 +2,22 @@ import { PrismaRepository } from '@api/repository/repository.service';
 import { CacheService } from '@api/services/cache.service';
 import { Logger } from '@config/logger.config';
 import fs from 'fs';
+import path from 'path';
 
 const CACHE_PREFIX = 'wwebjs:session:';
+const WWEBJS_DATA_MARKER = 'WWEBJS_ZIP:';
 
 /**
  * Prisma-based store for whatsapp-web.js RemoteAuth strategy.
- * Implements the Store interface: sessionExists, save, extract, delete.
- * Session zip data is stored as base64 in the database Session.creds field.
+ *
+ * RemoteAuth calls these methods with specific path semantics:
+ *   save({ session })          — session is the FULL path without .zip
+ *   extract({ session, path }) — path is the FULL path WITH .zip where we must write the zip
+ *   sessionExists({ session }) — session is the name (e.g. "RemoteAuth-xxx")
+ *   delete({ session })        — session is the name
+ *
+ * Data stored in DB is prefixed with WWEBJS_ZIP: to distinguish from Baileys JSON data.
+ * Legacy data (without prefix) is also supported if it's valid base64 zip.
  */
 export class PrismaRemoteStore {
   private readonly logger = new Logger('PrismaRemoteStore');
@@ -19,22 +28,79 @@ export class PrismaRemoteStore {
     private readonly cache?: CacheService,
   ) {}
 
+  private isWWebJSData(data: string): boolean {
+    return data.startsWith(WWEBJS_DATA_MARKER);
+  }
+
+  /**
+   * Check if raw base64 data is a valid zip (PK header = 0x50 0x4B → base64 starts with "UEs")
+   */
+  private isLegacyZipData(data: string): boolean {
+    return data.startsWith('UEs') || data.startsWith('UEsD');
+  }
+
+  private packData(base64Zip: string): string {
+    return `${WWEBJS_DATA_MARKER}${base64Zip}`;
+  }
+
+  private unpackData(data: string): string | null {
+    if (this.isWWebJSData(data)) {
+      return data.substring(WWEBJS_DATA_MARKER.length);
+    }
+    if (this.isLegacyZipData(data)) {
+      return data;
+    }
+    return null;
+  }
+
+  private isValidZipBuffer(buf: Buffer): boolean {
+    return buf.length >= 22 && buf[0] === 0x50 && buf[1] === 0x4b;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async sessionExists(_options: { session: string }): Promise<boolean> {
     try {
       if (this.cache) {
         const cached = await this.cache.get(`${CACHE_PREFIX}${this.instanceId}`);
-        if (cached) return true;
+        if (cached && typeof cached === 'string') {
+          if (this.isWWebJSData(cached) || this.isLegacyZipData(cached)) {
+            this.logger.info(`[sessionExists] Found wwebjs session in cache for ${this.instanceId}`);
+            return true;
+          }
+        }
       }
 
       const session = await this.prismaRepository.session.findFirst({
         where: { sessionId: this.instanceId },
-        select: { id: true },
+        select: { id: true, creds: true },
       });
 
-      return !!session;
+      if (!session?.creds) {
+        this.logger.info(`[sessionExists] No session data in DB for ${this.instanceId}`);
+        return false;
+      }
+
+      const credsStr = typeof session.creds === 'string' ? session.creds : JSON.stringify(session.creds);
+
+      if (this.isWWebJSData(credsStr)) {
+        this.logger.info(`[sessionExists] Found prefixed wwebjs session in DB for ${this.instanceId}`);
+        return true;
+      }
+
+      if (this.isLegacyZipData(credsStr)) {
+        this.logger.info(
+          `[sessionExists] Found legacy (unprefixed) zip session in DB for ${this.instanceId} (${(credsStr.length / 1024).toFixed(0)} KB)`,
+        );
+        return true;
+      }
+
+      this.logger.warn(
+        `[sessionExists] Found non-wwebjs data in DB for ${this.instanceId} ` +
+          `(starts with: "${credsStr.substring(0, 20)}..."), treating as non-existent`,
+      );
+      return false;
     } catch (error) {
-      this.logger.error(`sessionExists failed for ${this.instanceId}: ${error}`);
+      this.logger.error(`[sessionExists] Failed for ${this.instanceId}: ${error}`);
       return false;
     }
   }
@@ -43,72 +109,133 @@ export class PrismaRemoteStore {
     try {
       const zipPath = `${options.session}.zip`;
 
+      this.logger.info(`[save] Looking for zip at: ${zipPath}`);
+
       if (!fs.existsSync(zipPath)) {
-        this.logger.warn(`Zip file not found at ${zipPath}, skipping save`);
+        this.logger.warn(`[save] Zip file not found at ${zipPath}, skipping save`);
         return;
       }
 
       const zipBuffer = fs.readFileSync(zipPath);
-      const base64Data = zipBuffer.toString('base64');
+
+      if (!this.isValidZipBuffer(zipBuffer)) {
+        this.logger.warn(
+          `[save] Invalid zip file at ${zipPath} (${zipBuffer.length} bytes, header: ${zipBuffer.slice(0, 4).toString('hex')}), skipping`,
+        );
+        return;
+      }
 
       const existing = await this.prismaRepository.session.findFirst({
         where: { sessionId: this.instanceId },
+        select: { creds: true },
       });
+
+      if (existing?.creds) {
+        const existingStr = typeof existing.creds === 'string' ? existing.creds : '';
+        const existingRaw = this.unpackData(existingStr);
+        if (existingRaw) {
+          const existingSize = Buffer.from(existingRaw, 'base64').length;
+          const MIN_SIZE_FOR_PROTECTION = 100 * 1024;
+          const SIZE_REGRESSION_RATIO = 0.5;
+
+          if (existingSize > MIN_SIZE_FOR_PROTECTION && zipBuffer.length < existingSize * SIZE_REGRESSION_RATIO) {
+            this.logger.warn(
+              `[save] New zip (${(zipBuffer.length / 1024).toFixed(1)} KB) is less than 50% of existing ` +
+                `(${(existingSize / 1024).toFixed(1)} KB) — skipping save to protect valid session data`,
+            );
+            return;
+          }
+        }
+      }
+
+      const base64Data = zipBuffer.toString('base64');
+      const packedData = this.packData(base64Data);
 
       if (existing) {
         await this.prismaRepository.session.update({
           where: { sessionId: this.instanceId },
-          data: { creds: base64Data },
+          data: { creds: packedData },
         });
       } else {
         await this.prismaRepository.session.create({
           data: {
             sessionId: this.instanceId,
-            creds: base64Data,
+            creds: packedData,
           },
         });
       }
 
       if (this.cache) {
-        await this.cache.set(`${CACHE_PREFIX}${this.instanceId}`, base64Data);
+        await this.cache.set(`${CACHE_PREFIX}${this.instanceId}`, packedData);
       }
 
-      this.logger.info(`Session saved to database for ${this.instanceId} (${(zipBuffer.length / 1024).toFixed(1)} KB)`);
+      this.logger.info(
+        `[save] Session saved to DB for ${this.instanceId} (${(zipBuffer.length / 1024).toFixed(1)} KB)`,
+      );
     } catch (error) {
-      this.logger.error(`save failed for ${this.instanceId}: ${error}`);
+      this.logger.error(`[save] Failed for ${this.instanceId}: ${error}`);
     }
   }
 
   async extract(options: { session: string; path: string }): Promise<void> {
     try {
-      let base64Data: string | null = null;
+      let rawData: string | null = null;
 
       if (this.cache) {
         const cached = await this.cache.get(`${CACHE_PREFIX}${this.instanceId}`);
-        if (cached) base64Data = cached as string;
+        if (cached && typeof cached === 'string') {
+          rawData = cached;
+          this.logger.info(`[extract] Session data loaded from cache for ${this.instanceId}`);
+        }
       }
 
-      if (!base64Data) {
+      if (!rawData) {
         const session = await this.prismaRepository.session.findFirst({
           where: { sessionId: this.instanceId },
         });
 
         if (!session?.creds) {
-          this.logger.warn(`No session data found in database for ${this.instanceId}`);
+          this.logger.warn(`[extract] No session data in DB for ${this.instanceId}`);
           return;
         }
 
-        base64Data = typeof session.creds === 'string' ? session.creds : JSON.stringify(session.creds);
+        rawData = typeof session.creds === 'string' ? session.creds : JSON.stringify(session.creds);
+        this.logger.info(
+          `[extract] Session data loaded from DB for ${this.instanceId} (${(rawData.length / 1024).toFixed(0)} KB)`,
+        );
+      }
+
+      const base64Data = this.unpackData(rawData);
+      if (!base64Data) {
+        this.logger.error(
+          `[extract] Data is not valid wwebjs format for ${this.instanceId} (starts with: "${rawData.substring(0, 20)}...")`,
+        );
+        return;
       }
 
       const zipBuffer = Buffer.from(base64Data, 'base64');
-      fs.writeFileSync(options.path, zipBuffer);
+
+      if (!this.isValidZipBuffer(zipBuffer)) {
+        this.logger.error(
+          `[extract] Decoded data is not a valid zip for ${this.instanceId} ` +
+            `(${zipBuffer.length} bytes, header: ${zipBuffer.slice(0, 4).toString('hex')})`,
+        );
+        return;
+      }
+
+      const targetPath = options.path;
+      const targetDir = path.dirname(targetPath);
+      if (targetDir && !fs.existsSync(targetDir)) {
+        fs.mkdirSync(targetDir, { recursive: true });
+      }
+
+      fs.writeFileSync(targetPath, zipBuffer);
 
       this.logger.info(
-        `Session extracted from database for ${this.instanceId} (${(zipBuffer.length / 1024).toFixed(1)} KB)`,
+        `[extract] Session zip written to ${targetPath} for ${this.instanceId} (${(zipBuffer.length / 1024).toFixed(1)} KB)`,
       );
     } catch (error) {
-      this.logger.error(`extract failed for ${this.instanceId}: ${error}`);
+      this.logger.error(`[extract] Failed for ${this.instanceId}: ${error}`);
     }
   }
 
@@ -129,9 +256,9 @@ export class PrismaRemoteStore {
         await this.cache.delete(`${CACHE_PREFIX}${this.instanceId}`);
       }
 
-      this.logger.info(`Session deleted from database for ${this.instanceId}`);
+      this.logger.info(`[delete] Session deleted from DB for ${this.instanceId}`);
     } catch (error) {
-      this.logger.error(`delete failed for ${this.instanceId}: ${error}`);
+      this.logger.error(`[delete] Failed for ${this.instanceId}: ${error}`);
     }
   }
 }
