@@ -57,41 +57,43 @@ export class PrismaRemoteStore {
     return buf.length >= 22 && buf[0] === 0x50 && buf[1] === 0x4b;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async sessionExists(_options: { session: string }): Promise<boolean> {
+  async sessionExists(options: { session: string }): Promise<boolean> {
     try {
-      if (this.cache) {
-        const cached = await this.cache.get(`${CACHE_PREFIX}${this.instanceId}`);
-        if (cached && typeof cached === 'string') {
-          if (this.isWWebJSData(cached) || this.isLegacyZipData(cached)) {
-            this.logger.info(`[sessionExists] Found wwebjs session in cache for ${this.instanceId}`);
-            return true;
-          }
-        }
-      }
-
+      const sessionKey = options.session || `RemoteAuth-${this.instanceId}`;
       const session = await this.prismaRepository.session.findFirst({
         where: { sessionId: this.instanceId },
         select: { id: true, creds: true },
       });
 
       if (!session?.creds) {
-        this.logger.info(`[sessionExists] No session data in DB for ${this.instanceId}`);
+        this.logger.info(`[sessionExists] No session data in DB for ${sessionKey}`);
         return false;
       }
 
       const credsStr = typeof session.creds === 'string' ? session.creds : JSON.stringify(session.creds);
 
       if (this.isWWebJSData(credsStr)) {
-        this.logger.info(`[sessionExists] Found prefixed wwebjs session in DB for ${this.instanceId}`);
+        this.logger.info(`[sessionExists] Found prefixed wwebjs session in DB for ${sessionKey}`);
         return true;
       }
 
       if (this.isLegacyZipData(credsStr)) {
         this.logger.info(
-          `[sessionExists] Found legacy (unprefixed) zip session in DB for ${this.instanceId} (${(credsStr.length / 1024).toFixed(0)} KB)`,
+          `[sessionExists] Found legacy (unprefixed) zip session in DB for ${sessionKey} (${(credsStr.length / 1024).toFixed(0)} KB)`,
         );
         return true;
+      }
+
+      if (this.cache) {
+        const cached = await this.cache.get(`${CACHE_PREFIX}${this.instanceId}`);
+        if (cached && typeof cached === 'string') {
+          if (this.isWWebJSData(cached) || this.isLegacyZipData(cached)) {
+            this.logger.warn(
+              `[sessionExists] DB data is not wwebjs format, but cache has session for ${sessionKey}; using cache as fallback`,
+            );
+            return true;
+          }
+        }
       }
 
       this.logger.warn(
@@ -100,7 +102,7 @@ export class PrismaRemoteStore {
       );
       return false;
     } catch (error) {
-      this.logger.error(`[sessionExists] Failed for ${this.instanceId}: ${error}`);
+      this.logger.error(`[sessionExists] Failed for ${options.session || this.instanceId}: ${error}`);
       return false;
     }
   }
@@ -180,29 +182,26 @@ export class PrismaRemoteStore {
   async extract(options: { session: string; path: string }): Promise<void> {
     try {
       let rawData: string | null = null;
+      const session = await this.prismaRepository.session.findFirst({
+        where: { sessionId: this.instanceId },
+      });
 
-      if (this.cache) {
-        const cached = await this.cache.get(`${CACHE_PREFIX}${this.instanceId}`);
-        if (cached && typeof cached === 'string') {
-          rawData = cached;
-          this.logger.info(`[extract] Session data loaded from cache for ${this.instanceId}`);
-        }
-      }
-
-      if (!rawData) {
-        const session = await this.prismaRepository.session.findFirst({
-          where: { sessionId: this.instanceId },
-        });
-
-        if (!session?.creds) {
-          this.logger.warn(`[extract] No session data in DB for ${this.instanceId}`);
-          return;
-        }
-
+      if (session?.creds) {
         rawData = typeof session.creds === 'string' ? session.creds : JSON.stringify(session.creds);
         this.logger.info(
           `[extract] Session data loaded from DB for ${this.instanceId} (${(rawData.length / 1024).toFixed(0)} KB)`,
         );
+      } else if (this.cache) {
+        const cached = await this.cache.get(`${CACHE_PREFIX}${this.instanceId}`);
+        if (cached && typeof cached === 'string') {
+          rawData = cached;
+          this.logger.warn(`[extract] DB session missing, loaded fallback data from cache for ${this.instanceId}`);
+        }
+      }
+
+      if (!rawData) {
+        this.logger.warn(`[extract] No session data in DB/cache for ${this.instanceId}`);
+        return;
       }
 
       const base64Data = this.unpackData(rawData);
@@ -239,9 +238,9 @@ export class PrismaRemoteStore {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async delete(_options: { session: string }): Promise<void> {
+  async delete(options: { session: string }): Promise<void> {
     try {
+      const sessionKey = options.session || `RemoteAuth-${this.instanceId}`;
       const existing = await this.prismaRepository.session.findFirst({
         where: { sessionId: this.instanceId },
       });
@@ -256,9 +255,9 @@ export class PrismaRemoteStore {
         await this.cache.delete(`${CACHE_PREFIX}${this.instanceId}`);
       }
 
-      this.logger.info(`[delete] Session deleted from DB for ${this.instanceId}`);
+      this.logger.info(`[delete] Session deleted from DB for ${sessionKey}`);
     } catch (error) {
-      this.logger.error(`[delete] Failed for ${this.instanceId}: ${error}`);
+      this.logger.error(`[delete] Failed for ${options.session || this.instanceId}: ${error}`);
     }
   }
 }

@@ -1,0 +1,15 @@
+# Cursor Kurallari - Husky Uyumu
+
+Bu repository icin AI tarafindan uretilen kodlar commit oncesi asagidaki zincire uygun olmalidir:
+
+1. `npx lint-staged`:
+   - `src/**/*.{ts,js}` -> `eslint --fix`
+   - `src/**/*.ts` -> `tsc --noEmit`
+2. `commit-msg`:
+   - `npx --no -- commitlint --edit $1`
+
+Zorunlu yazim kurallari:
+- `require()` kullanma; ESM import veya dynamic import kullan.
+- Importlari sorted tut (`simple-import-sort`).
+- Prettier ihlali olusturma.
+- Commit mesaji Conventional Commits formatinda yaz.

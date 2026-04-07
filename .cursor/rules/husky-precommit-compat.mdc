@@ -1,0 +1,24 @@
+---
+description: Husky ve lint-staged uyumlu kod üretim kontrol listesi
+alwaysApply: true
+---
+
+# Husky Uyum Kurali
+
+Bu projede commit oncesi kontrol zinciri aktif:
+- `pre-commit`: `lint-staged`
+- `src/**/*.{ts,js}`: `eslint --fix`
+- `src/**/*.ts`: `tsc --noEmit`
+- `commit-msg`: `commitlint --edit`
+
+Kod degisikligi yaparken asagidaki kurallara uy:
+
+1. `require()` yerine ESM import kullan (`import ... from ...` veya `await import(...)`).
+2. Prettier uyumlu satir uzunlugu ve satir kirilimi kullan.
+3. TypeScript derleme hatasi olusturma (`tsc --noEmit` temiz gecmeli).
+4. Import sirasi bozulmamali (`simple-import-sort` kurallarina uy).
+5. Commit mesaji Conventional Commits formatinda olmali (`type(scope): subject`).
+
+Degisiklikten sonra mumkunse su komutlari calistir:
+- `npx eslint "src/**/**.{ts,js}"`
+- `npx tsc --noEmit`

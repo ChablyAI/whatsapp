@@ -175,9 +175,9 @@ async function bootstrap() {
     logger.log(`${signal} received — saving sessions before shutdown...`);
 
     const forceExitTimer = setTimeout(() => {
-      logger.warn('Shutdown timeout (15s) — forcing exit');
+      logger.warn('Shutdown timeout (30s) — forcing exit');
       process.exit(1);
-    }, 15000);
+    }, 30000);
     forceExitTimer.unref();
 
     try {
