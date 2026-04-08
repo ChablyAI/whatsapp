@@ -168,6 +168,43 @@
 - [x] Kişi kaydetme (Contact upsert)
 - [x] Sohbet kaydetme (Chat upsert)
 
+### Bağlantı sonrası senkron — chats / contacts / geçmiş (Baileys parity)
+
+> Baileys tek seferde “toplam sayı” API’si çağırmaz: `chats.upsert`, `contacts.upsert/update` ve özellikle `messaging-history.set` batch’leri ile veri ve webhook’lar gelir. wwebjs’te `ready` sonrası aynı semantiği hedefle.
+
+#### A — Sohbet listesi (`chats.upsert` benzeri)
+- [ ] `ready` (veya ilk stabil oturum) sonrası `client.getChats()` ile sohbet listesini al
+- [ ] Prisma `chat` ile diff: yalnızca yeni kayıtlar için `createMany` + `skipDuplicates` (`SAVE_DATA.CHATS` / mevcut DB bayraklarıyla uyumlu)
+- [ ] `Events.CHATS_UPSERT` — Baileys gibi yalnızca **yeni eklenen** sohbetler (veya bilinçli olarak tam liste; tüketici sözleşmesi net olsun)
+- [ ] Çok sohbet: batch / kuyruk / `setImmediate` ile ana döngüyü kilitlememe
+
+#### B — Kişi listesi (`contacts.upsert` kısmi karşılığı)
+- [ ] `client.getContacts()` ile bootstrap (maliyet yüksek olabilir; feature flag / lazy strateji değerlendir)
+- [ ] `SAVE_DATA.CONTACTS` açıksa `contact.createMany` + `skipDuplicates`; `Events.CONTACTS_UPSERT`
+- [ ] Profil fotoğrafı güncellemesi (Baileys’teki `profilePicture` döngüsü ile uyumlu, ayrı batch önerilir)
+- [ ] Chatwoot `importContacts` açıksa mevcut `addHistoryContacts` / import akışı
+
+#### C — Geçmiş mesajlar (`messaging-history.set` karşılığı)
+- [ ] Instance ayarı: Baileys `syncFullHistory` / `SAVE_DATA.HISTORIC` ile aynı anlama gelecek bayrakların wwebjs dalında kullanımı
+- [ ] Sohbet bazlı `chat.fetchMessages({ limit })` ve/veya `client.syncHistory(chatId)` — dokümantasyona göre kapsam sınırlı olabilir
+- [ ] Chatwoot için `daysLimitImportMessages` (veya eşdeğeri) ile tarih filtresi — Baileys `messaging-history.set` ile aynı mantık
+- [ ] Her işlenen batch için `Events.MESSAGES_SET` + metadata (`isLatest`, `progress`; wwebjs’te yoksa tahmini veya `undefined`)
+- [ ] İlk kez görülen sohbetler için `Events.CHATS_SET` (Baileys `chatsRaw` semantiği)
+- [ ] `chatwootService.addHistoryMessages` koşulları Baileys ile hizalı
+
+#### D — Gözlemlenebilirlik
+- [ ] Yapılandırılmış log: batch başına `chatsCount`, `contactsCount`, `messagesCount` (ör. `recv N chats, M contacts, K msgs` satırına denk)
+- [ ] İsteğe bağlı: `sendTelemetry` veya hafif özet webhook (yalnızca sayılar; ürün kararı)
+
+#### E — Olaylar (incremental)
+- [ ] `chat_removed` / `chat_archived` → `CHATS_DELETE` / güncelleme (bootstrap sırası ile çakışma kuralları)
+- [ ] `contact_changed` → `contacts.update` benzeri Prisma + `CONTACTS_UPDATE` webhook
+
+#### F — Kabul ve riskler
+- [ ] `getChats()` / `getContacts()` için timeout, feature flag (`bootstrapSyncOnReady`), büyük instance’larda bellek
+- [ ] Webhook sırası: `CONNECTION_UPDATE` → `CHATS_UPSERT` / `CHATS_SET` / `MESSAGES_SET` (tüketiciler Baileys sırasına alışkın olabilir)
+- [ ] `MESSAGES_SET` payload’ının mevcut `prepareMessage` formatıyla tüketici uyumluluğu
+
 ### Mesaj Güncellemeleri
 - [x] `messages.update` handler → `message_ack` eventi
   - wwebjs: `client.on('message_ack', (msg, ack) => ...)`
@@ -195,8 +232,8 @@
 
 ### Mesaj Geçmişi
 - [ ] `messaging-history.set` handler — Geçmiş senkronu
-  - Baileys: Büyük geçmiş senkronizasyonu
-  - wwebjs: `client.syncHistory(chatId)` — kısmi geçmiş
+  - Baileys: Büyük geçmiş senkronizasyonu (batch’lerde chats/contacts/messages; `CHATS_SET` / `MESSAGES_SET`)
+  - wwebjs: `client.syncHistory(chatId)` / `chat.fetchMessages` — kısmi geçmiş; **ayrıntılı maddeler: yukarıdaki "Bağlantı sonrası senkron" → C ve F**
 
 ### LID/PN Eşlemesi
 - [ ] `enrichMessageKeyWithLid` / `normalizeKeyPnAltFields`
