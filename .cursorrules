@@ -13,3 +13,6 @@ Zorunlu yazim kurallari:
 - Importlari sorted tut (`simple-import-sort`).
 - Prettier ihlali olusturma.
 - Commit mesaji Conventional Commits formatinda yaz.
+
+Kanal uyumu: WebJS ve Baileys gibi birden fazla WhatsApp saglayicisinda webhook/RabbitMQ mesaj sozlesmesi (or. `mediaUrl`, S3 anahtar yapisi) ayni kalacak sekilde tasarlanir; ilgili kararlar `RDP.md` ile eslenir.
+- WebJS (wwebjs) oturumu: varsayilan `LocalAuth` (`.wwebjs_auth/`); ayrintilar `RDP.md` (WebJS oturum stratejisi).

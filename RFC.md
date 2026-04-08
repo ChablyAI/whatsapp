@@ -14,6 +14,7 @@ AI tarafindan yazilan degisiklikler bazen commit asamasinda `lint-staged` ve `co
 
 ## Kapsam
 - Tum repository (always apply).
+- Kanal entegrasyonlarinda (or. WebJS gelen medya, WebJS oturum stratejisi) RabbitMQ/webhook yuklerinin veya baglanti davranisinin Baileys/operasyon beklentileriyle hizalanmasi gerektiginde kararlar `RDP.md` altinda kayit altina alinir.
 
 ## Kabul Kriterleri
 - Yeni yazilan kodlar `eslint --fix` ve `tsc --noEmit` adimlarini gecmeli.

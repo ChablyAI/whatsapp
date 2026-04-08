@@ -57,6 +57,7 @@ import { Message } from '@prisma/client';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import EventEmitter2 from 'eventemitter2';
 import * as fs from 'fs';
+import mimeTypes from 'mime-types';
 import * as path from 'path';
 import qrcode, { QRCodeToDataURLOptions } from 'qrcode';
 import { v4 } from 'uuid';
@@ -93,7 +94,8 @@ export class WWebJSStartupService extends ChannelStartupService {
   private dbBackupIntervalTimer: NodeJS.Timeout | null = null;
   private readonly dbBackupIntervalMs = 5 * 60 * 1000;
   private readonly initialDbBackupDelayMs = 30 * 1000;
-  private readonly useRemoteAuth = true;
+  /** false = LocalAuth (disk-only under `.wwebjs_auth/`); true = RemoteAuth + PrismaRemoteStore */
+  private readonly useRemoteAuth = false;
   private lastRestoreSource: 'local' | 'db' | 'none' = 'none';
   private endSession = false;
 
@@ -1311,9 +1313,10 @@ export class WWebJSStartupService extends ChannelStartupService {
 
     // Save to database
     const db = this.configService.get<Database>('DATABASE');
+    let savedMessage: Message | null = null;
     if (db.SAVE_DATA.NEW_MESSAGE) {
       try {
-        await this.prismaRepository.message.create({
+        savedMessage = await this.prismaRepository.message.create({
           data: {
             key: messageRaw.key,
             pushName: messageRaw.pushName,
@@ -1337,8 +1340,8 @@ export class WWebJSStartupService extends ChannelStartupService {
       }
     }
 
-    // Media download + S3 upload
-    if (isMedia && msg.hasMedia) {
+    // Media download + S3 upload (same layout as Baileys incoming media: instanceId/remoteJid/messageType/timestamp_fileName)
+    if (isMedia && msg.hasMedia && db.SAVE_DATA.NEW_MESSAGE && savedMessage) {
       try {
         const media = await msg.downloadMedia();
         if (media) {
@@ -1346,10 +1349,17 @@ export class WWebJSStartupService extends ChannelStartupService {
           if (s3Config?.ENABLE) {
             const buffer = Buffer.from(media.data, 'base64');
             const ext = media.mimetype?.split('/')?.[1]?.split(';')?.[0] || 'bin';
-            const fullName = `${this.instanceId}/${messageRaw.messageType}/${messageRaw.key.id}.${ext}`;
+            const fileName = media.filename || `${messageRaw.key.id}.${ext}`;
+            const mimetype = String(mimeTypes.lookup(fileName) || media.mimetype || 'application/octet-stream');
+            const fullName = path.posix.join(
+              `${this.instance.id}`,
+              messageRaw.key.remoteJid,
+              messageRaw.messageType,
+              `${Date.now()}_${fileName}`,
+            );
 
             await s3Service.uploadFile(fullName, buffer, buffer.length, {
-              'Content-Type': media.mimetype,
+              'Content-Type': mimetype,
             });
 
             const mediaUrl = await s3Service.getObjectUrl(fullName);
@@ -1357,23 +1367,18 @@ export class WWebJSStartupService extends ChannelStartupService {
 
             await this.prismaRepository.media.create({
               data: {
-                messageId: messageRaw.key.id,
+                messageId: savedMessage.id,
                 instanceId: this.instanceId,
                 type: messageRaw.messageType,
-                fileName: media.filename || `${messageRaw.key.id}.${ext}`,
-                mimetype: media.mimetype,
+                fileName: fullName,
+                mimetype,
               },
             });
 
-            if (db.SAVE_DATA.NEW_MESSAGE) {
-              await this.prismaRepository.message.updateMany({
-                where: {
-                  instanceId: this.instanceId,
-                  key: { path: ['id'], equals: messageRaw.key.id },
-                },
-                data: { message: { ...messageRaw.message, mediaUrl } },
-              });
-            }
+            await this.prismaRepository.message.update({
+              where: { id: savedMessage.id },
+              data: messageRaw,
+            });
           }
 
           // Webhook base64
