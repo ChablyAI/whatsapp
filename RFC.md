@@ -15,6 +15,7 @@ AI tarafindan yazilan degisiklikler bazen commit asamasinda `lint-staged` ve `co
 ## Kapsam
 - Tum repository (always apply).
 - Kanal entegrasyonlarinda (or. WebJS gelen medya, WebJS oturum stratejisi) RabbitMQ/webhook yuklerinin veya baglanti davranisinin Baileys/operasyon beklentileriyle hizalanmasi gerektiginde kararlar `RDP.md` altinda kayit altina alinir.
+- Yerel altyapi (`docker-compose.services.yaml`: Postgres, Redis, RabbitMQ, MinIO, Soketi) ve Pusher-protokol alternatifleri icin operasyonel notlar `RDP.md` ile eslenir.
 
 ## Kabul Kriterleri
 - Yeni yazilan kodlar `eslint --fix` ve `tsc --noEmit` adimlarini gecmeli.

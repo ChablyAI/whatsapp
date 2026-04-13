@@ -33,3 +33,15 @@ Cursor tarafinda uretilen kodlarin Husky pre-commit ve commit-msg kontrolleri il
 
 ## Beklenen Etki
 - Gelistirme ve tek makine senaryolarinda baglanti dogrudan yerel Chrome profili uzerinden calisir; RemoteAuth kaynakli ek senkronizasyon katmani devre disidir.
+
+---
+
+## Konu: Yerel Soketi (Pusher-protokol alternatifi)
+
+## Karar
+- `docker-compose.services.yaml` icine `soketi` servisi eklendi: goruntu `quay.io/soketi/soketi:1.6-16-debian`, host port `127.0.0.1:16001` -> konteyner `6001`.
+- Varsayilan uygulama kimlikleri ortam degiskenleriyle (`SOKETI_DEFAULT_APP_*`) veya `.env` uzerinden ozellestirilebilir; varsayilanlar: `evolution` / `evolution-key` / `evolution-secret`.
+- Evolution API tarafinda Pusher bulutu yerine Soketi kullanirken Node `pusher` istemcisi genelde `host` (or. `127.0.0.1` veya `soketi`) ve `port` (`16001` hosttan, veya Docker icinden `6001`) ister; mevcut kod yalnizca `cluster` ile Pusher bulutuna giderse, yerel Soketi icin istemci yapilandirmasinin genisletilmesi veya ara katman gerekir.
+
+## Beklenen Etki
+- Gelistirmede ucretli Pusher hesabi olmadan Pusher-protokol uyumlu kanal test edilebilir; port ve kimlik bilgileri dokumante edildi.

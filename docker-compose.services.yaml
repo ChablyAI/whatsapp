@@ -1,11 +1,16 @@
-# Local dev dependencies only: Postgres, Redis, RabbitMQ, MinIO.
+# Local dev dependencies only: Postgres, Redis, RabbitMQ, MinIO, Soketi (Pusher-compatible).
 # Run: docker compose -f docker-compose.services.yaml up -d
 # Then API: npm run dev:server | Manager: npm run dev:manager (with host ports for DB/Redis)
 #
 # env_file: .env. For ${VAR} in this file use:
 #   docker compose -f docker-compose.services.yaml up -d
 #
-# Host ports (avoid local conflicts): Postgres 15432, Redis 16379, MinIO API 19000 / console 19001
+# Host ports (avoid local conflicts): Postgres 15432, Redis 16379, MinIO API 19000 / console 19001,
+#   Soketi (HTTP/WebSocket) 16001 -> container 6001
+#
+# Soketi: self-hosted Pusher protocol. Default app (override via .env if needed):
+#   app id / key / secret must match Evolution Pusher settings; cluster can be any non-empty string
+#   when using the pusher npm client with custom host+port (see RDP.md).
 
 services:
   redis:
@@ -89,6 +94,20 @@ services:
     ports:
       - "127.0.0.1:19000:9000"
       - "127.0.0.1:19001:9001"
+
+  soketi:
+    container_name: evolution_soketi
+    image: quay.io/soketi/soketi:1.6-16-debian
+    restart: always
+    environment:
+      SOKETI_DEBUG: ${SOKETI_DEBUG:-1}
+      SOKETI_DEFAULT_APP_ID: ${SOKETI_DEFAULT_APP_ID:-evolution}
+      SOKETI_DEFAULT_APP_KEY: ${SOKETI_DEFAULT_APP_KEY:-evolution-key}
+      SOKETI_DEFAULT_APP_SECRET: ${SOKETI_DEFAULT_APP_SECRET:-evolution-secret}
+    networks:
+      - evolution-net
+    ports:
+      - "127.0.0.1:16001:6001"
 
 volumes:
   evolution_redis:
