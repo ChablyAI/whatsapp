@@ -54,7 +54,9 @@ import { Chatwoot, ConfigService, Database, QrCode, S3 } from '@config/env.confi
 import { Logger } from '@config/logger.config';
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
 import { Message } from '@prisma/client';
+import { createJid } from '@utils/createJid';
 import { sendTelemetry } from '@utils/sendTelemetry';
+import { delay, isJidGroup } from 'baileys';
 import EventEmitter2 from 'eventemitter2';
 import * as fs from 'fs';
 import mimeTypes from 'mime-types';
@@ -1234,6 +1236,99 @@ export class WWebJSStartupService extends ChannelStartupService {
     return jid.replace(/@c\.us$/, '@s.whatsapp.net').replace(/^(\d+)$/, '$1@s.whatsapp.net');
   }
 
+  /** whatsapp-web.js private chats use `@c.us`; Baileys-style JIDs use `@s.whatsapp.net`. */
+  private toWWebJsChatId(jid: string): string {
+    if (!jid) return jid;
+    if (jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@lid')) {
+      return jid;
+    }
+    if (jid.endsWith('@s.whatsapp.net')) {
+      return jid.replace('@s.whatsapp.net', '@c.us');
+    }
+    if (jid.endsWith('@c.us')) {
+      return jid;
+    }
+    return jid.includes('@') ? jid : `${jid}@c.us`;
+  }
+
+  private async wwebjsTypingDelay(chatId: string, delayMs?: number): Promise<void> {
+    if (!delayMs || delayMs <= 0 || !this.wwebClient) {
+      return;
+    }
+    let chat: { sendStateTyping: () => Promise<void>; clearState: () => Promise<void> };
+    try {
+      chat = await this.wwebClient.getChatById(chatId);
+    } catch {
+      return;
+    }
+    const runChunk = async (ms: number) => {
+      await chat.sendStateTyping();
+      await delay(ms);
+      await chat.clearState();
+    };
+    if (delayMs > 20000) {
+      let remaining = delayMs;
+      while (remaining > 20000) {
+        await runChunk(20000);
+        remaining -= 20000;
+      }
+      if (remaining > 0) {
+        await runChunk(remaining);
+      }
+    } else {
+      await runChunk(delayMs);
+    }
+  }
+
+  private quotedMessageIdFromDto(quoted?: { key?: { id?: string | null } }): string | undefined {
+    const id = quoted?.key?.id;
+    return typeof id === 'string' && id.length > 0 ? id : undefined;
+  }
+
+  private async finalizeOutboundSend(messageRaw: any, isIntegration: boolean): Promise<void> {
+    if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && !isIntegration) {
+      this.chatwootService.eventWhatsapp(
+        Events.SEND_MESSAGE,
+        { instanceName: this.instance.name, instanceId: this.instanceId },
+        messageRaw,
+      );
+    }
+
+    const db = this.configService.get<Database>('DATABASE');
+    if (db.SAVE_DATA.NEW_MESSAGE) {
+      try {
+        await this.prismaRepository.message.create({
+          data: {
+            key: messageRaw.key,
+            pushName: messageRaw.pushName,
+            participant: messageRaw.key.participant,
+            messageType: messageRaw.messageType,
+            message: messageRaw.message,
+            contextInfo: messageRaw.contextInfo,
+            source: messageRaw.source,
+            messageTimestamp: messageRaw.messageTimestamp,
+            instanceId: this.instanceId,
+            status: messageRaw.status,
+          },
+        });
+      } catch (error) {
+        this.logger.error(`Error saving outbound message: ${error}`);
+      }
+    }
+
+    this.sendDataWebhook(Events.SEND_MESSAGE, messageRaw);
+
+    if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && isIntegration) {
+      await chatbotController.emit({
+        instance: { instanceName: this.instance.name, instanceId: this.instanceId },
+        remoteJid: messageRaw.key.remoteJid,
+        msg: messageRaw,
+        pushName: messageRaw.pushName,
+        isIntegration,
+      });
+    }
+  }
+
   private prepareMessage(msg: any): any {
     const messageType = this.mapWWebJSTypeToMessageType(msg.type, msg);
     const messageContent = this.buildMessageContent(msg);
@@ -1487,13 +1582,62 @@ export class WWebJSStartupService extends ChannelStartupService {
   }
 
   // =====================================================
-  // PHASE 2+ STUBS: To be implemented in future phases
-  // All methods below follow the same contract as Baileys
+  // PHASE 2+: Outbound messages (parity with Baileys contract)
   // =====================================================
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  public async textMessage(_data: SendTextDto, _isIntegration = false) {
-    throw new BadRequestException('Method not yet implemented on WWebJS Channel - Phase 2');
+  public async textMessage(data: SendTextDto, isIntegration = false) {
+    const text = data.text;
+    if (!text || text.trim().length === 0) {
+      throw new BadRequestException('Text is required');
+    }
+    if (!this.wwebClient) {
+      throw new BadRequestException('WhatsApp client is not connected');
+    }
+
+    const jid = createJid(data.number);
+    const chatId = this.toWWebJsChatId(jid);
+
+    await this.wwebjsTypingDelay(chatId, data.delay);
+
+    const sendOptions: Record<string, unknown> = {
+      linkPreview: data.linkPreview !== false,
+    };
+
+    const qId = this.quotedMessageIdFromDto(data.quoted);
+    if (qId) {
+      sendOptions.quotedMessageId = qId;
+    }
+
+    if (data.mentioned?.length) {
+      sendOptions.mentions = data.mentioned.map((n) => this.toWWebJsChatId(createJid(n)));
+    } else if (data.mentionsEveryOne && isJidGroup(jid)) {
+      try {
+        const chat = await this.wwebClient.getChatById(chatId);
+        const participants = (chat as { participants?: { id: { _serialized: string } }[] }).participants;
+        if (participants?.length) {
+          sendOptions.mentions = participants.map((p) => p.id._serialized);
+        }
+      } catch {
+        // ignore @all failure; send without mentions
+      }
+    }
+
+    let sent: any;
+    try {
+      sent = await this.wwebClient.sendMessage(chatId, data.text, sendOptions);
+    } catch (error) {
+      this.logger.error(error);
+      throw new BadRequestException(error?.toString?.() ?? 'Failed to send message');
+    }
+
+    if (!sent) {
+      throw new BadRequestException('Failed to send message');
+    }
+
+    const messageRaw = this.prepareMessage(sent);
+    await this.finalizeOutboundSend(messageRaw, isIntegration);
+    sendTelemetry('/message/sendText');
+    return messageRaw;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars

@@ -59,8 +59,10 @@
 
 ## Aşama 2 - Mesaj Gönderme
 
+> **Saha notu (Evolution + whatsapp-web.js):** Metin, medya, ses, sticker, konum, kişi kartı ve tepki gönderimi Evolution API hattı üzerinde pratikte doğrulandı. **Anket (`pollMessage`)** gönderiminde bilinen sorunlar var; öncelik düşük, sonraya bırakıldı. Aşağıdaki ince ayarlar (link preview, mention, quoted, ses dönüşüm yardımcıları vb.) ayrı takip edilir.
+
 ### Temel Mesajlar
-- [ ] `textMessage()` — Metin mesajı gönderme
+- [x] `textMessage()` — Metin mesajı gönderme
   - Baileys: `client.sendMessage(jid, { text })`
   - wwebjs: `client.sendMessage(chatId, content, options)`
   - [ ] Link preview desteği
@@ -69,36 +71,36 @@
   - [ ] Delay (gecikme) ile gönderim
 
 ### Medya Mesajları
-- [ ] `mediaMessage()` — Genel medya gönderme (image/video/document)
+- [x] `mediaMessage()` — Genel medya gönderme (image/video/document)
   - Baileys: `client.sendMessage(jid, { image/video/document, caption })`
   - wwebjs: `client.sendMessage(chatId, new MessageMedia(...), { caption })`
-  - [ ] URL'den medya gönderme
-  - [ ] Base64'ten medya gönderme
-  - [ ] Buffer'dan medya gönderme
-  - [ ] Dosya adı (fileName) desteği
-  - [ ] Caption desteği
+  - [x] URL'den medya gönderme
+  - [x] Base64'ten medya gönderme
+  - [x] Buffer'dan medya gönderme
+  - [x] Dosya adı (fileName) desteği
+  - [x] Caption desteği
 
 ### Ses Mesajları
-- [ ] `audioWhatsapp()` — Ses mesajı (PTT/voice note)
+- [x] `audioWhatsapp()` — Ses mesajı (PTT/voice note)
   - Baileys: `client.sendMessage(jid, { audio, ptt: true })`
   - wwebjs: `client.sendMessage(chatId, media, { sendAudioAsVoice: true })`
 - [ ] `processAudio()` — Ses format dönüşümü (MP4/OGG)
 - [ ] `processAudioMp4()` — MP4 ses işleme
 
 ### Sticker
-- [ ] `mediaSticker()` — Sticker gönderme
+- [x] `mediaSticker()` — Sticker gönderme
   - Baileys: WebP dönüşümü + `client.sendMessage(jid, { sticker })`
   - wwebjs: `client.sendMessage(chatId, media, { sendMediaAsSticker: true })`
   - [ ] Sticker metadata (pack name, author)
   - [ ] Sticker pack desteği (`sendMediaAsStickerPack`)
 
 ### Konum
-- [ ] `locationMessage()` — Konum mesajı
+- [x] `locationMessage()` — Konum mesajı
   - Baileys: `client.sendMessage(jid, { location: { degreesLatitude, degreesLongitude } })`
   - wwebjs: `client.sendMessage(chatId, new Location(lat, lng, description))`
 
 ### Kişi Kartı
-- [ ] `contactMessage()` — vCard mesajı
+- [x] `contactMessage()` — vCard mesajı
   - Baileys: `client.sendMessage(jid, { contacts: { contacts: [vcard] } })`
   - wwebjs: `client.sendMessage(chatId, new Contact(...))` veya vCard string
 
@@ -108,12 +110,13 @@
   - wwebjs: ⚠️ **Buttons/Lists deprecated** — alternatif gerekli
 - [ ] `listMessage()` — Liste mesajı
   - wwebjs: ⚠️ **Deprecated** — alternatif gerekli
-- [ ] `reactionMessage()` — Emoji tepkisi
+- [x] `reactionMessage()` — Emoji tepkisi
   - Baileys: `client.sendMessage(jid, { react: { text: emoji, key } })`
   - wwebjs: `message.react(emoji)`
 
 ### Anket
 - [ ] `pollMessage()` — Anket oluşturma ve gönderme
+  - **Bilinen sorun:** Evolution + wwebjs üzerinden anket gönderildiğinde davranış sorunlu; acil değil, düzeltme backlog’da.
   - Baileys: `client.sendMessage(jid, { poll: { name, values, selectableCount } })`
   - wwebjs: `client.sendMessage(chatId, new Poll(name, options))`
   - [ ] Anket oyu alma (vote_update eventi)
