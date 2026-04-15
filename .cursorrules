@@ -14,6 +14,6 @@ Zorunlu yazim kurallari:
 - Prettier ihlali olusturma.
 - Commit mesaji Conventional Commits formatinda yaz.
 
-Kanal uyumu: WebJS ve Baileys gibi birden fazla WhatsApp saglayicisinda webhook/RabbitMQ mesaj sozlesmesi (or. `mediaUrl`, S3 anahtar yapisi) ayni kalacak sekilde tasarlanir; ilgili kararlar `RDP.md` ile eslenir.
+Kanal uyumu: WebJS ve Baileys gibi birden fazla WhatsApp saglayicisinda webhook/RabbitMQ mesaj sozlesmesi (or. `key.id`, `mediaUrl`, S3 anahtar yapisi) ayni kalacak sekilde tasarlanir; ilgili kararlar `RDP.md` ile eslenir.
 - WebJS (wwebjs) oturumu: varsayilan `LocalAuth` (`.wwebjs_auth/`); ayrintilar `RDP.md` (WebJS oturum stratejisi).
 - Yerel servisler: `docker-compose.services.yaml` Postgres, Redis, RabbitMQ, MinIO ve Pusher-protokol uyumlu Soketi (`127.0.0.1:16001`); ayrintilar `RDP.md`.

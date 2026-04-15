@@ -983,10 +983,10 @@ export class WWebJSStartupService extends ChannelStartupService {
     this.wwebClient.on('message_ack', async (msg: any, ack: number) => {
       try {
         const ackStatus = this.mapAckToStatus(ack);
-        const keyId = msg.id?._serialized || msg.id?.id;
+        const keyId = this.wwebjsMessageKeyId(msg.id);
         const normalizedJid = this.normalizeJid(msg.from || msg.to);
 
-        if (this.configService.get<Database>('DATABASE').SAVE_DATA.MESSAGE_UPDATE) {
+        if (keyId && this.configService.get<Database>('DATABASE').SAVE_DATA.MESSAGE_UPDATE) {
           const existingMsg = await this.prismaRepository.message.findFirst({
             where: {
               instanceId: this.instanceId,
@@ -1024,9 +1024,9 @@ export class WWebJSStartupService extends ChannelStartupService {
 
     this.wwebClient.on('message_revoke_everyone', async (revokedMsg: any, oldMsg: any) => {
       try {
-        const keyId = revokedMsg.id?._serialized || revokedMsg.id?.id;
+        const keyId = this.wwebjsMessageKeyId(revokedMsg.id);
 
-        if (this.configService.get<Database>('DATABASE').DELETE_DATA?.LOGICAL_MESSAGE_DELETE) {
+        if (keyId && this.configService.get<Database>('DATABASE').DELETE_DATA?.LOGICAL_MESSAGE_DELETE) {
           await this.prismaRepository.message.updateMany({
             where: {
               instanceId: this.instanceId,
@@ -1052,14 +1052,16 @@ export class WWebJSStartupService extends ChannelStartupService {
 
     this.wwebClient.on('message_edit', async (msg: any, newBody: string, prevBody: string) => {
       try {
-        const keyId = msg.id?._serialized || msg.id?.id;
+        const keyId = this.wwebjsMessageKeyId(msg.id);
 
-        const existingMsg = await this.prismaRepository.message.findFirst({
-          where: {
-            instanceId: this.instanceId,
-            key: { path: ['id'], equals: keyId },
-          },
-        });
+        const existingMsg = keyId
+          ? await this.prismaRepository.message.findFirst({
+              where: {
+                instanceId: this.instanceId,
+                key: { path: ['id'], equals: keyId },
+              },
+            })
+          : null;
 
         if (existingMsg) {
           await this.prismaRepository.message.update({
@@ -1104,7 +1106,7 @@ export class WWebJSStartupService extends ChannelStartupService {
           key: {
             remoteJid: this.normalizeJid(reaction.senderId),
             fromMe: false,
-            id: reaction.msgId?._serialized || reaction.msgId?.id,
+            id: this.wwebjsMessageKeyId(reaction.msgId),
           },
           reaction: {
             text: reaction.reaction,
@@ -1285,6 +1287,38 @@ export class WWebJSStartupService extends ChannelStartupService {
     return typeof id === 'string' && id.length > 0 ? id : undefined;
   }
 
+  /**
+   * whatsapp-web.js MessageId: `id` is the short server id (Baileys-style). `_serialized` is
+   * `true|false_<jid>_<id>`. Use short id everywhere so webhooks/DB match Baileys `key.id`.
+   */
+  private baileysStyleIdFromWwebjsSerialized(serialized: string): string | undefined {
+    const last = serialized.lastIndexOf('_');
+    if (last < 0 || last >= serialized.length - 1) {
+      return undefined;
+    }
+    const tail = serialized.slice(last + 1);
+    if (tail.length >= 6 && /^[0-9A-F]+$/i.test(tail)) {
+      return tail;
+    }
+    return undefined;
+  }
+
+  private wwebjsMessageKeyId(msgId: { _serialized?: string; id?: string } | null | undefined): string | undefined {
+    if (!msgId) {
+      return undefined;
+    }
+    const shortId = typeof msgId.id === 'string' && msgId.id.trim().length > 0 ? msgId.id.trim() : undefined;
+    if (shortId) {
+      return shortId;
+    }
+    const serialized =
+      typeof msgId._serialized === 'string' && msgId._serialized.length > 0 ? msgId._serialized : undefined;
+    if (!serialized) {
+      return undefined;
+    }
+    return this.baileysStyleIdFromWwebjsSerialized(serialized) ?? serialized;
+  }
+
   private async finalizeOutboundSend(messageRaw: any, isIntegration: boolean): Promise<void> {
     if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && !isIntegration) {
       this.chatwootService.eventWhatsapp(
@@ -1340,7 +1374,7 @@ export class WWebJSStartupService extends ChannelStartupService {
       key: {
         remoteJid,
         fromMe: msg.fromMe || false,
-        id: msg.id?._serialized || msg.id?.id || v4(),
+        id: this.wwebjsMessageKeyId(msg.id) ?? v4(),
         participant: msg.author ? this.normalizeJid(msg.author) : undefined,
       },
       pushName: msg._data?.notifyName || msg._data?.pushname || (msg.fromMe ? 'Você' : undefined),

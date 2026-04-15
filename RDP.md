@@ -25,6 +25,17 @@ Cursor tarafinda uretilen kodlarin Husky pre-commit ve commit-msg kontrolleri il
 
 ---
 
+## Konu (WebJS): `key.id` ile Baileys uyumu (whatsapp-web.js MessageId)
+
+## Karar
+- `whatsapp-web.js` mesaj kimligi `MessageId.id` (kisa sunucu id’si) ve `_serialized` (`true|false_<jid>_<id>`) olarak ikiye ayrilir.
+- `whatsapp.wwebjs.service.ts` icinde webhook, veritabani ve ilgili olaylar (`message_ack`, revoke, edit, reaction) `key.id` olarak **yalnizca kisa id** kullanir: once `msg.id.id`, yoksa `_serialized` son `_` sonrasi (hex) parca; Baileys `key.id` ile ayni semantik.
+
+## Beklenen Etki
+- WebJS ve Baileys tuketicileri mesaj anahtarini ayni formatta karsilar; `true_...@c.us_` oneki webhook yuklerinde yer almaz.
+
+---
+
 ## Konu (WebJS): Oturum stratejisi — LocalAuth varsayilan
 
 ## Karar
